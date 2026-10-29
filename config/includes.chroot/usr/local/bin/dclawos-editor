@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(
 import gi  # noqa: E402
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("GtkSource", "4.0")
+gi.require_version("GtkSource", "4")
 from gi.repository import Gtk, GLib, GtkSource  # noqa: E402
 
 try:

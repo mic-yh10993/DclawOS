@@ -68,7 +68,7 @@ for path in \
     usr/local/bin/dclawos-agent-run \
     usr/local/bin/dclawos-editor \
     usr/local/lib/dclawos/modifiedfiles.py \
-    usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.0.typelib \
+    usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.typelib \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
     usr/bin/xdotool \
