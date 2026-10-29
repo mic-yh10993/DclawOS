@@ -1,10 +1,32 @@
 #!/usr/bin/env python3
-"""Fail a QEMU graphical smoke check when the captured PPM is effectively blank.
+"""Fail a QEMU graphical smoke check when the captured PPM is not the
+DclawOS Phase 1 desktop.
 
-The check is intentionally conservative: it is not a UI snapshot test.  It
-only distinguishes a rendered graphical scene from the all-black frame observed
-when the Live session stayed off the active VT.  A text console occupies too
-few pixels to satisfy the threshold.
+Phase 1 desktop appearance (what the gate is matched to):
+- Openbox root window with NO wallpaper: black everywhere except the
+  taskbar. The taskbar is a full-width 48px strip pinned to the bottom
+  (dclawos-shell: move(0, height-48)), rendered in the default GTK theme,
+  which is essentially grayscale.
+- That is why the old DclawOS gates do NOT apply here: the old desktop
+  painted a colorful aurora wallpaper over nearly the whole frame
+  (non-black ~100%, mean saturation ~0.95) and the old saturation gate
+  existed to exclude the GDM greeter. The new desktop has no wallpaper
+  (non-black ~= 48/height ~= 6% at 800px tall) and a grayscale theme
+  (saturation ~= 0), and the greeter is excluded by the session-marker
+  gate in qemu-boot-smoke.sh, not by saturation.
+
+Gate (all three must hold):
+1. Overall non-black ratio >= 4%: excludes all-black / dead frames.
+   A taskbar-only desktop is ~6%; a text console is ~9% — the ratio
+   alone does not discriminate those two, it only excludes blank.
+2. Sampled color variation >= 32: excludes a uniform X root window.
+3. Bottom-band density >= 30%: sampled pixels in the last 10% of rows
+   must be at least 30% non-black. This is the taskbar discriminator:
+   the taskbar strip fills ~60% of the bottom band's samples, while a
+   text console's bottom band holds at most a login-prompt line or two
+   (well under 30%). Run 6 evidence: its frame had exactly 7680
+   non-black samples at 1280x800 — precisely the taskbar strip's sampled
+   size (1280*48/8) — yet the old 12% / saturation gates failed it.
 """
 from __future__ import annotations
 
@@ -57,65 +79,53 @@ def main() -> int:
         return 1
 
     sample_step = 8
+    bottom_start_row = height - max(1, height // 10)
     sampled = 0
     nonblack = 0
-    sat_sum = 0.0
+    bottom_sampled = 0
+    bottom_nonblack = 0
     sampled_colors: set[tuple[int, int, int]] = set()
-    for offset in range(0, len(pixels), 3 * sample_step):
+    pixel_count = width * height
+    for index in range(0, pixel_count, sample_step):
+        offset = 3 * index
         red, green, blue = pixels[offset : offset + 3]
         sampled += 1
         sampled_colors.add((red, green, blue))
-        if red > 8 or green > 8 or blue > 8:
+        is_nonblack = red > 8 or green > 8 or blue > 8
+        if is_nonblack:
             nonblack += 1
-        brightest = red
-        if green > brightest:
-            brightest = green
-        if blue > brightest:
-            brightest = blue
-        darkest = red
-        if green < darkest:
-            darkest = green
-        if blue < darkest:
-            darkest = blue
-        if brightest > 0:
-            sat_sum += (brightest - darkest) / brightest
+        if index // width >= bottom_start_row:
+            bottom_sampled += 1
+            if is_nonblack:
+                bottom_nonblack += 1
 
     ratio = nonblack / sampled if sampled else 0.0
     color_count = len(sampled_colors)
-    mean_sat = sat_sum / sampled if sampled else 0.0
+    bottom_density = bottom_nonblack / bottom_sampled if bottom_sampled else 0.0
     print(
         f"QEMU visual frame {width}x{height}: "
         f"non-black samples {nonblack}/{sampled} ({ratio:.2%}); "
-        f"sampled colors {color_count}; mean saturation {mean_sat:.3f}"
+        f"sampled colors {color_count}; "
+        f"bottom-band non-black {bottom_nonblack}/{bottom_sampled} ({bottom_density:.2%})"
     )
-    if ratio < 0.12:
+    if ratio < 0.04:
         print(
-            "QEMU frame is effectively blank or a sparse text console; "
+            "QEMU frame is effectively blank; "
             "the Live graphical desktop was not visibly rendered",
             file=sys.stderr,
         )
         return 1
-    # A running X server's untouched root window is often a uniform gray. It is
-    # non-black, but it is not a rendered desktop. Text consoles also expose
-    # only a tiny palette. A rendered desktop, login or installer scene has
-    # substantial color variation after the same sparse sampling.
     if color_count < 32:
         print(
             "QEMU frame has too little color variation; it is a uniform X root "
-            "window or sparse console rather than a rendered Live desktop",
+            "window rather than a rendered Live desktop",
             file=sys.stderr,
         )
         return 1
-    # The GDM login screen passes the checks above (it is non-black and has
-    # antialiased text), which is how Build 50 shipped with a broken
-    # autologin. The DclawOS desktop paints the colorful aurora wallpaper
-    # over nearly the whole frame (mean saturation ~0.95), while the GDM
-    # greeter is essentially monochrome (mean saturation ~0.001). The greeter
-    # background is deliberately left dark so this stays a reliable signal.
-    if mean_sat < 0.10:
+    if bottom_density < 0.30:
         print(
-            "QEMU frame has near-zero color saturation; it is the GDM login "
-            "screen, not the rendered DclawOS desktop (autologin did not happen)",
+            "QEMU frame has no rendered bottom taskbar band; "
+            "it is a text console, not the DclawOS Phase 1 desktop",
             file=sys.stderr,
         )
         return 1
