@@ -46,8 +46,10 @@ xorriso -osirrox on -indev "$ISO" \
     -extract /live/initrd.img "$INITRD" >/dev/null 2>&1
 
 unsquashfs -l "$FS" > "$LIST"
-# Normalize: unsquashfs -l may or may not prefix paths with "/".
-sed -i 's|^/||' "$LIST"
+# Listing format note (run 4 lesson): unsquashfs -l prefixes entries
+# (e.g. squashfs-root/...), so exact full-line matches miss. Match the
+# path suffix anchored at a boundary instead; this covers slash-less,
+# slash-prefixed and squashfs-root-prefixed listings alike.
 
 # Phase-1 session-critical paths must be present in the final image.
 for path in \
@@ -59,7 +61,7 @@ for path in \
     usr/sbin/lightdm \
     usr/bin/python3 \
 ; do
-    grep -q "^${path}$" "$LIST" || {
+    grep -qE "(^|/)${path}$" "$LIST" || {
         echo "missing from final image: /$path" >&2
         exit 1
     }
@@ -71,7 +73,7 @@ for path in \
     usr/bin/gnome-shell \
     usr/bin/firefox \
 ; do
-    if grep -q "^${path}$" "$LIST"; then
+    if grep -qE "(^|/)${path}$" "$LIST"; then
         echo "scope regression: forbidden binary present in final image: /$path" >&2
         exit 1
     fi

@@ -167,10 +167,6 @@ jobs:
           sudo lb build 2>&1 | tee -a build.log
           sudo rm -rf chroot chroot.tmp 2>/dev/null || true
           df -h /
-          # Diagnostic (run 3 found no ISO with the assumed names): list
-          # what lb build actually produced before locating the image.
-          ls -la
-          find . -maxdepth 3 -type f -name '*.iso' -printf '%p %s bytes\n' || true
           ISO_SOURCE="$(find . -maxdepth 3 -type f -name '*.iso' | head -n1)"
           test -n "$ISO_SOURCE"
           chmod 755 scripts/repack-dclawos-dualboot-iso.sh
