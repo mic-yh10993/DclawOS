@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""DclawOS ticket CLI (Phase 2 module 5): request/approve/deny tickets.
+
+Tickets live in /run/dclawos/tickets/ (see ticketlib.py). Flow:
+  dclawos-ticket request --operation read-file \
+      --params '{"path": "/etc/dclawos/release"}' --summary 'read release'
+  dclawos-ticket approve --id <id>      # TEST-ONLY until module 6:
+                                        # production approval comes from
+                                        # the human GUI popup, not this CLI.
+  <agent sends {ticket_id, operation, params} to the broker socket>
+  dclawos-ticket status --id <id>
+  dclawos-ticket list
+
+The broker (dclawos-privileged) refuses anything without an APPROVED,
+unexpired ticket whose operation and params hash match the request.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+import ticketlib  # noqa: E402
+
+
+def _parse_params(text):
+    try:
+        params = json.loads(text)
+    except ValueError as exc:
+        raise SystemExit(f"dclawos-ticket: invalid --params JSON: {exc}")
+    if not isinstance(params, dict):
+        raise SystemExit("dclawos-ticket: --params must be a JSON object")
+    return params
+
+
+def cmd_request(args):
+    if args.ttl <= 0:
+        raise SystemExit("dclawos-ticket: --ttl must be positive")
+    params = _parse_params(args.params)
+    ticket = ticketlib.new_ticket(
+        args.operation, params, args.summary, args.ttl)
+    os.makedirs(ticketlib.tickets_dir(), exist_ok=True)
+    ticketlib.save_ticket(ticket)
+    print(json.dumps(ticket, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_approve(args):
+    print(
+        "WARNING: CLI approval is test-only; production approval comes "
+        "from the human GUI popup (module 6).",
+        file=sys.stderr)
+    try:
+        ticket = ticketlib.load_ticket(args.id)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"dclawos-ticket: ticket unreadable: {exc}")
+    if ticket.get("status") != "pending":
+        raise SystemExit(
+            f"dclawos-ticket: cannot approve ticket in status "
+            f"{ticket.get('status')!r}")
+    if ticketlib.is_expired(ticket):
+        raise SystemExit("dclawos-ticket: ticket already expired")
+    ticket["status"] = "approved"
+    ticket["approved_by"] = args.by
+    ticket["approved_at"] = int(time.time())
+    ticketlib.save_ticket(ticket)
+    print(json.dumps(ticket, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_deny(args):
+    try:
+        ticket = ticketlib.load_ticket(args.id)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"dclawos-ticket: ticket unreadable: {exc}")
+    if ticket.get("status") != "pending":
+        raise SystemExit(
+            f"dclawos-ticket: cannot deny ticket in status "
+            f"{ticket.get('status')!r}")
+    ticket["status"] = "denied"
+    ticketlib.save_ticket(ticket)
+    print(json.dumps(ticket, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_status(args):
+    try:
+        ticket = ticketlib.load_ticket(args.id)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"dclawos-ticket: ticket unreadable: {exc}")
+    shown = dict(ticket)
+    shown["expired"] = ticketlib.is_expired(ticket)
+    print(json.dumps(shown, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_list(_args):
+    try:
+        names = sorted(os.listdir(ticketlib.tickets_dir()))
+    except OSError as exc:
+        raise SystemExit(f"dclawos-ticket: cannot list tickets: {exc}")
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        ticket_id = name[:-5]
+        try:
+            ticket = ticketlib.load_ticket(ticket_id)
+        except (ValueError, OSError, json.JSONDecodeError):
+            print(f"{ticket_id} unreadable", file=sys.stderr)
+            continue
+        expired = " expired" if ticketlib.is_expired(ticket) else ""
+        print(f"{ticket['id']} {ticket.get('operation')} "
+              f"{ticket.get('status')}{expired} "
+              f"expires={ticket.get('expires_at')}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="dclawos-ticket")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("request", help="create a pending ticket")
+    p.add_argument("--operation", required=True)
+    p.add_argument("--params", default="{}")
+    p.add_argument("--summary", default="")
+    p.add_argument("--ttl", type=int, default=900)
+    p.set_defaults(func=cmd_request)
+
+    p = sub.add_parser("approve", help="approve a pending ticket (TEST-ONLY)")
+    p.add_argument("--id", required=True)
+    p.add_argument("--by", default="cli-test")
+    p.set_defaults(func=cmd_approve)
+
+    p = sub.add_parser("deny", help="deny a pending ticket")
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_deny)
+
+    p = sub.add_parser("status", help="show one ticket")
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("list", help="list all tickets")
+    p.set_defaults(func=cmd_list)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

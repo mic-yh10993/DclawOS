@@ -3,7 +3,7 @@
 # Adapted from the old DclawOS smoke script (same monitor/sendkey/poll
 # skeleton), with the gate changed for the new session stack:
 #
-# Gate (all three must hold):
+# Gate (all must hold):
 #   1. A screendump frame passes the generic non-blank visual check
 #      (validate-qemu-visual-frame.py) — proves a graphical scene rendered.
 #   2. The guest serial console contains the "dclawos-session" marker.
@@ -13,7 +13,11 @@
 #      succeeds, so the marker proves: boot -> autologin -> session ->
 #      autostart -> shell launch chain completed. A LightDM greeter frame
 #      alone (autologin failed) never produces this marker.
-#   3. QEMU stays alive past the budget (rc 124) with no boot-failure
+#   3. The guest serial console contains the "dclawos-privileged
+#      listening" marker (module 5): the privilege broker logs it to
+#      stderr on startup, journald forwards it, so the marker proves the
+#      broker service started and bound its socket.
+#   4. QEMU stays alive past the budget (rc 124) with no boot-failure
 #      diagnostics in its own log.
 #
 # Serial log is diagnostic-first: on failure the script dumps marker hits
@@ -97,6 +101,7 @@ printf 'sendkey ret\n' | socat - UNIX-CONNECT:"$MONITOR" >/dev/null 2>&1 || {
 DEADLINE_EPOCH=$((START_EPOCH + BUDGET - POLL_MARGIN))
 FRAME_OK=0
 MARKER_OK=0
+BROKER_OK=0
 LAST_CHECK_LOG="$WORK/frame-check.log"
 sleep "$MIN_DWELL"
 while :; do
@@ -108,7 +113,10 @@ while :; do
     if grep -a -q "dclawos-session" "$SERIAL_LOG" 2>/dev/null; then
         MARKER_OK=1
     fi
-    if [ "$FRAME_OK" -eq 1 ] && [ "$MARKER_OK" -eq 1 ]; then
+    if grep -a -q "dclawos-privileged listening" "$SERIAL_LOG" 2>/dev/null; then
+        BROKER_OK=1
+    fi
+    if [ "$FRAME_OK" -eq 1 ] && [ "$MARKER_OK" -eq 1 ] && [ "$BROKER_OK" -eq 1 ]; then
         break
     fi
     [ "$(date +%s)" -ge "$DEADLINE_EPOCH" ] && break
@@ -132,8 +140,8 @@ dump_guest_console() {
     echo "--- guest serial console tail (last 30 lines) ---"
     tail -30 "$SERIAL_LOG" || true
 }
-if [ "$FRAME_OK" -ne 1 ] || [ "$MARKER_OK" -ne 1 ]; then
-    echo "QEMU $MODE smoke failed: frame_ok=$FRAME_OK marker_ok=$MARKER_OK within ${BUDGET}s budget" >&2
+if [ "$FRAME_OK" -ne 1 ] || [ "$MARKER_OK" -ne 1 ] || [ "$BROKER_OK" -ne 1 ]; then
+    echo "QEMU $MODE smoke failed: frame_ok=$FRAME_OK marker_ok=$MARKER_OK broker_ok=$BROKER_OK within ${BUDGET}s budget" >&2
     [ -f "$LAST_CHECK_LOG" ] && cat "$LAST_CHECK_LOG" >&2 || true
     dump_guest_console "session not reached" >&2
     exit 1

@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""DclawOS privileged broker (Phase 2 module 5): ticket-gated root ops.
+
+Runs as root via systemd (dclawos-privileged.service). Listens on the
+Unix socket /run/dclawos/privileged.sock (root:dclaw 0660: only root and
+the dclaw group can connect). The AI never runs privileged commands
+itself: it presents an APPROVED ticket (see ticketlib.py), and the
+broker executes exactly the ticketed operation with exactly the
+ticketed params — anything else is refused.
+
+Whitelist (module 5, deliberately small; it grows module by module
+together with the approval GUI):
+- read-file: read a text file under /etc/dclawos/, /var/lib/dclawos/
+  or /var/log/dclawos/ (symlinks resolved; 1 MB cap). Read-only.
+- service-status: systemctl is-active for a DclawOS-owned unit
+  (dclawos-* only). Read-only.
+- restart-service: systemctl restart for a DclawOS-owned unit
+  (dclawos-* only). The only mutating op in module 5, bounded to
+  DclawOS's own services.
+Everything else (package install, system config writes, arbitrary
+commands) is refused until a later module whitelists it with GUI
+approval. The broker logs ticket id + operation + outcome only — never
+params contents and never ticket file contents.
+
+Reuse notes (evaluation cards §5, step 0 retrieval):
+- Ticket-gated execution follows the OpenClaw gateway approval PATTERN
+  (approve-before-execute, per-operation ticket with expiry): the
+  pattern is reused, the implementation is DclawOS-written (Unix socket
+  + JSON ticket files instead of the gateway's HTTP approval flow).
+// reuse-check: openclaw approval/HTTP flow NOT copied, reason: the
+  gateway's approval is an HTTP service with its own auth model; the
+  DclawOS broker is a local root daemon, so only the
+  approve-before-execute pattern transfers, not the transport.
+"""
+
+import grp
+import json
+import os
+import re
+import socketserver
+import stat
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+import ticketlib  # noqa: E402
+
+READ_PREFIXES = ("/etc/dclawos", "/var/lib/dclawos", "/var/log/dclawos")
+READ_SIZE_CAP = 1024 * 1024
+UNIT_RE = re.compile(r"^dclawos-[a-z0-9-]+(\.service)?$")
+REQUEST_SIZE_CAP = 64 * 1024
+
+
+def log(msg):
+    print(f"dclawos-privileged: {msg}", flush=True)
+
+
+def _is_under(path, prefix):
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def op_read_file(params):
+    path = params.get("path")
+    if not isinstance(path, str) or not path:
+        return False, "read-file requires a string 'path' param"
+    real = os.path.realpath(path)
+    if not any(_is_under(real, prefix) for prefix in READ_PREFIXES):
+        return False, f"read-file path outside allowed prefixes: {path!r}"
+    try:
+        size = os.path.getsize(real)
+    except OSError as exc:
+        return False, f"read-file cannot stat: {exc}"
+    if size > READ_SIZE_CAP:
+        return False, "read-file file too large (>1MB)"
+    try:
+        with open(real, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+    except OSError as exc:
+        return False, f"read-file cannot read: {exc}"
+    return True, {"path": real, "content": content}
+
+
+def _check_unit(params):
+    unit = params.get("unit")
+    if not isinstance(unit, str) or not UNIT_RE.match(unit):
+        return None, (
+            f"unit must match dclawos-* (got {unit!r}); "
+            "only DclawOS-owned units are whitelisted")
+    return unit, None
+
+
+def op_service_status(params):
+    unit, error = _check_unit(params)
+    if error is not None:
+        return False, error
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        return False, "systemctl not available"
+    except subprocess.TimeoutExpired:
+        return False, "systemctl is-active timed out"
+    if proc.returncode != 0:
+        return False, (
+            f"systemctl is-active failed ({proc.returncode}): "
+            f"{proc.stderr.strip()}")
+    return True, {"unit": unit, "active": proc.stdout.strip()}
+
+
+def op_restart_service(params):
+    unit, error = _check_unit(params)
+    if error is not None:
+        return False, error
+    try:
+        proc = subprocess.run(
+            ["systemctl", "restart", unit],
+            capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return False, "systemctl not available"
+    except subprocess.TimeoutExpired:
+        return False, "systemctl restart timed out"
+    if proc.returncode != 0:
+        return False, (
+            f"systemctl restart failed ({proc.returncode}): "
+            f"{proc.stderr.strip()}")
+    return True, {"unit": unit, "restarted": True}
+
+
+OPERATIONS = {
+    "read-file": op_read_file,
+    "service-status": op_service_status,
+    "restart-service": op_restart_service,
+}
+
+
+def execute(request):
+    ticket_id = request.get("ticket_id")
+    operation = request.get("operation")
+    params = request.get("params")
+    if not isinstance(ticket_id, str) or not isinstance(operation, str) \
+            or not isinstance(params, dict):
+        return {"ok": False, "error": "request needs ticket_id, operation, params"}
+    try:
+        ticket = ticketlib.load_ticket(ticket_id)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"ticket unreadable: {exc}"}
+    ok, error = ticketlib.validate_for_execution(ticket, operation, params)
+    if not ok:
+        if ticket.get("status") == "approved" \
+                and ticketlib.is_expired(ticket):
+            ticket["status"] = "expired"
+            try:
+                ticketlib.save_ticket(ticket)
+            except OSError:
+                pass
+        log(f"refused ticket={ticket_id} operation={operation} reason={error}")
+        return {"ok": False, "error": error}
+    handler = OPERATIONS.get(operation)
+    if handler is None:
+        log(f"refused ticket={ticket_id} operation={operation} "
+            "reason=not in whitelist")
+        return {"ok": False,
+                "error": f"operation not in whitelist: {operation!r}"}
+    success, result = handler(params)
+    if not success:
+        log(f"failed ticket={ticket_id} operation={operation} "
+            f"reason={result}")
+        return {"ok": False, "error": result}
+    ticket["status"] = "consumed"
+    ticket["executed_at"] = int(time.time())
+    ticket["result"] = "ok"
+    try:
+        ticketlib.save_ticket(ticket)
+    except OSError as exc:
+        log(f"warning: could not mark ticket consumed: {exc}")
+    log(f"executed ticket={ticket_id} operation={operation}")
+    return {"ok": True, "result": result}
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        try:
+            line = self.rfile.readline(REQUEST_SIZE_CAP + 1)
+        except OSError:
+            return
+        if not line or len(line) > REQUEST_SIZE_CAP:
+            self._reply({"ok": False, "error": "request too large or empty"})
+            return
+        try:
+            request = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._reply({"ok": False, "error": "request is not valid JSON"})
+            return
+        if not isinstance(request, dict):
+            self._reply({"ok": False, "error": "request must be a JSON object"})
+            return
+        self._reply(execute(request))
+
+    def _reply(self, payload):
+        try:
+            self.wfile.write(
+                (json.dumps(payload) + "\n").encode("utf-8"))
+            self.wfile.flush()
+        except OSError:
+            pass
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def main():
+    sock_path = ticketlib.socket_path()
+    tickets = ticketlib.tickets_dir()
+    os.makedirs(tickets, exist_ok=True)
+    try:
+        os.chmod(tickets, 0o770)
+        try:
+            os.chown(tickets, 0, grp.getgrnam("dclaw").gr_gid)
+        except (KeyError, OSError):
+            pass
+    except OSError as exc:
+        log(f"warning: tickets dir perms: {exc}")
+    if os.path.exists(sock_path):
+        try:
+            mode = os.stat(sock_path).st_mode
+        except OSError:
+            mode = 0
+        if stat.S_ISSOCK(mode):
+            os.unlink(sock_path)
+        else:
+            log(f"refusing to unlink non-socket file at {sock_path}")
+            return 1
+    os.makedirs(os.path.dirname(sock_path) or ".", exist_ok=True)
+    server = Server(sock_path, Handler)
+    try:
+        os.chmod(sock_path, 0o660)
+        try:
+            os.chown(sock_path, 0, grp.getgrnam("dclaw").gr_gid)
+        except (KeyError, OSError):
+            pass
+    except OSError as exc:
+        log(f"warning: socket perms: {exc}")
+    # Smoke-test marker: the QEMU boot smoke greps the serial console
+    # for this line (journald forwards it) to prove the broker is live.
+    log(f"dclawos-privileged listening on {sock_path}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

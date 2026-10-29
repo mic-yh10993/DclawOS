@@ -1,0 +1,17 @@
+[Unit]
+Description=DclawOS privileged broker (ticket-gated root operations)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dclawos-privileged
+Restart=on-failure
+RestartSec=5
+# Creates /run/dclawos at service start; the daemon creates the
+# tickets/ subdir and the socket inside it (root:dclaw, group-gated).
+RuntimeDirectory=dclawos
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

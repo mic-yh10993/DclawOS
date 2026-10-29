@@ -1,0 +1,15 @@
+#!/bin/sh
+# Enable dclawos-privileged at boot (Phase 2 module 5).
+# Manual symlink (not systemctl enable): no daemon runs in the chroot,
+# and a symlink is exactly what enable would create. Hard-fails if the
+# unit file is missing so a silently unstarted broker cannot ship.
+set -eu
+
+UNIT=/etc/systemd/system/dclawos-privileged.service
+[ -f "$UNIT" ] || {
+    echo "dclawos-privileged: missing unit file: $UNIT" >&2
+    exit 1
+}
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf "$UNIT" \
+  /etc/systemd/system/multi-user.target.wants/dclawos-privileged.service
