@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""DclawOS AI monitor (Phase 2 module 7): watch + intervene/stop.
+
+Shows the AI user's processes and gives the human the intervention
+controls (user-confirmed Q1: monitor AND intervene/stop both):
+- "叫停 AI": sets the cooperative stop flag (dclawos-agent-ctl stop).
+  The flag takes effect when the agent service checks it before each
+  action — the service lands in a later module, so until then the flag
+  is armed but nothing honors it yet (stated on screen, not hidden).
+- "恢复 AI": clears the flag.
+- "强制结束 agent 进程": sudo pkill -u dclaw-agent, with a confirmation
+  dialog. This one is immediate regardless of any service.
+The event stream itself lives on the AI dashboard; this window is for
+processes + stop controls only. Process listing via ps needs no sudo
+(read-only); the kill needs the live session's NOPASSWD sudo.
+"""
+
+import os
+import subprocess
+import sys
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+CTL = "dclawos-agent-ctl"
+STOP_FLAG = "/var/lib/dclawos/agent-stop.json"
+AGENT_USER = "dclaw-agent"
+POLL_MS = 2000
+
+
+def log(msg):
+    print(f"dclawos-monitor: {msg}", flush=True)
+
+
+def ctl(*argv):
+    try:
+        proc = subprocess.run(
+            [CTL] + list(argv),
+            capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return 1, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+class MonitorApp(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-monitor")
+        self.set_default_size(800, 500)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        header = Gtk.Label(label="AI 监视 — agent 进程与叫停")
+        header.set_halign(Gtk.Align.START)
+        box.pack_start(header, False, False, 0)
+
+        self.status = Gtk.Label(label="")
+        self.status.set_halign(Gtk.Align.START)
+        box.pack_start(self.status, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_stop = Gtk.Button(label="叫停 AI（设置停止标志）")
+        btn_stop.connect("clicked", self.on_stop)
+        btn_resume = Gtk.Button(label="恢复 AI（清除标志）")
+        btn_resume.connect("clicked", self.on_resume)
+        btn_kill = Gtk.Button(label="强制结束 agent 进程")
+        btn_kill.connect("clicked", self.on_kill)
+        for btn in (btn_stop, btn_resume, btn_kill):
+            buttons.pack_start(btn, False, False, 0)
+        box.pack_start(buttons, False, False, 0)
+
+        note = Gtk.Label(
+            label="说明：叫停标志是协作式停止，agent 服务接入后才生效"
+                  "（当前尚无 agent 服务，标志先行武装）；强制结束立即"
+                  "终止所有 agent 进程。事件流请看 AI 看板。")
+        note.set_line_wrap(True)
+        note.set_halign(Gtk.Align.START)
+        box.pack_start(note, False, False, 0)
+
+        self.store = Gtk.ListStore(str, str, str)
+        tree = Gtk.TreeView(model=self.store)
+        for index, title in enumerate(("PID", "运行时长", "命令")):
+            column = Gtk.TreeViewColumn(
+                title, Gtk.CellRendererText(), text=index)
+            column.set_resizable(True)
+            if index == 2:
+                column.set_expand(True)
+            tree.append_column(column)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.add(tree)
+        box.pack_start(scrolled, True, True, 0)
+
+        self.refresh()
+        GLib.timeout_add(POLL_MS, self.refresh)
+
+    def read_flag(self):
+        flag_path = os.environ.get("DCLAWOS_STOP_FLAG", STOP_FLAG)
+        try:
+            import json
+            with open(flag_path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    def refresh(self):
+        flag = self.read_flag()
+        if flag is not None:
+            self.status.set_text(
+                "AI 状态：已叫停（停止标志已设置，agent 将不再执行新操作）"
+                f" — 原因：{flag.get('reason', '')}")
+        else:
+            self.status.set_text("AI 状态：运行中（无停止标志）")
+        try:
+            proc = subprocess.run(
+                ["ps", "-u", AGENT_USER, "-o", "pid=,etime=,cmd=",
+                 "--no-headers"],
+                capture_output=True, text=True, timeout=5)
+            lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            lines = []
+        self.store.clear()
+        if not lines:
+            self.store.append(("--", "--", "agent 未运行（无 agent 进程）"))
+        else:
+            for line in lines:
+                parts = line.strip().split(None, 2)
+                if len(parts) == 3:
+                    self.store.append((parts[0], parts[1], parts[2]))
+        return True
+
+    def on_stop(self, _button):
+        rc, _out, err = ctl("stop", "--reason", "human monitor stop")
+        if rc != 0:
+            self.status.set_text(f"叫停失败：{err.strip()}")
+        self.refresh()
+
+    def on_resume(self, _button):
+        rc, _out, err = ctl("resume")
+        if rc != 0:
+            self.status.set_text(f"恢复失败：{err.strip()}")
+        self.refresh()
+
+    def on_kill(self, _button):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="确定要强制结束所有 agent 进程吗？")
+        dialog.format_secondary_text(
+            "未保存的 agent 工作将丢失。此操作立即生效。")
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+        rc, out, err = ctl("kill")
+        if rc != 0:
+            self.status.set_text(f"强制结束失败：{err.strip()}")
+        else:
+            log(f"kill result: {out.strip()}")
+        self.refresh()
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-monitor (AI process monitor + stop controls)")
+        return 0
+    app = MonitorApp()
+    app.connect("destroy", Gtk.main_quit)
+    app.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

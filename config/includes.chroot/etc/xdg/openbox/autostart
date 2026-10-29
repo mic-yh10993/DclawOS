@@ -7,3 +7,10 @@ dclawos-shell &
 # The AI dashboard is the default desktop view (Phase 2 module 2): it
 # starts maximized (the taskbar strut keeps it clear of the taskbar).
 dclawos-dashboard &
+# AI session X access (Phase 2 module 7): publish this session's X
+# cookie for the AI user (dclaw-agent, member of dclawos-session).
+# The agent needs it to drive GUI apps in this session; the cookie is
+# refreshed on every login. Failures here must not break autostart.
+xauth extract /var/lib/dclawos/xauth "$DISPLAY" 2>/dev/null || true
+chgrp dclawos-session /var/lib/dclawos/xauth 2>/dev/null || true
+chmod 0640 /var/lib/dclawos/xauth 2>/dev/null || true

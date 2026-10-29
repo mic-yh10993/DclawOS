@@ -2,8 +2,9 @@
 """DclawOS privileged broker (Phase 2 module 5): ticket-gated root ops.
 
 Runs as root via systemd (dclawos-privileged.service). Listens on the
-Unix socket /run/dclawos/privileged.sock (root:dclaw 0660: only root and
-the dclaw group can connect). The AI never runs privileged commands
+Unix socket /run/dclawos/privileged.sock (0660, shared exchange group
+dclawos-session: root plus the AI user and the human, both members —
+module 7). The AI never runs privileged commands
 itself: it presents an APPROVED ticket (see ticketlib.py), and the
 broker executes exactly the ticketed operation with exactly the
 ticketed params — anything else is refused.
@@ -33,7 +34,6 @@ Reuse notes (evaluation cards §5, step 0 retrieval):
   approve-before-execute pattern transfers, not the transport.
 """
 
-import grp
 import json
 import os
 import re
@@ -217,15 +217,9 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 def main():
     sock_path = ticketlib.socket_path()
     tickets = ticketlib.tickets_dir()
-    os.makedirs(tickets, exist_ok=True)
-    try:
-        os.chmod(tickets, 0o770)
-        try:
-            os.chown(tickets, 0, grp.getgrnam("dclaw").gr_gid)
-        except (KeyError, OSError):
-            pass
-    except OSError as exc:
-        log(f"warning: tickets dir perms: {exc}")
+    # Exchange dir + socket: shared group (module 7) so the AI user
+    # (dclaw-agent) and the human (dclaw) can both use the broker.
+    ticketlib.ensure_dir(tickets)
     if os.path.exists(sock_path):
         try:
             mode = os.stat(sock_path).st_mode
@@ -240,12 +234,9 @@ def main():
     server = Server(sock_path, Handler)
     try:
         os.chmod(sock_path, 0o660)
-        try:
-            os.chown(sock_path, 0, grp.getgrnam("dclaw").gr_gid)
-        except (KeyError, OSError):
-            pass
     except OSError as exc:
         log(f"warning: socket perms: {exc}")
+    ticketlib.set_shared_group(sock_path)
     # Smoke-test marker: the QEMU boot smoke greps the serial console
     # for this line (journald forwards it) to prove the broker is live.
     log(f"dclawos-privileged listening on {sock_path}")

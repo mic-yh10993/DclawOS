@@ -43,7 +43,7 @@ def cmd_request(args):
     params = _parse_params(args.params)
     ticket = ticketlib.new_ticket(
         args.operation, params, args.summary, args.ttl)
-    os.makedirs(ticketlib.tickets_dir(), exist_ok=True)
+    ticketlib.ensure_dir(ticketlib.tickets_dir())
     ticketlib.save_ticket(ticket)
     print(json.dumps(ticket, indent=2, sort_keys=True))
     return 0

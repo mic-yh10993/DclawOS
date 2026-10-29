@@ -26,6 +26,7 @@ Security notes (read before extending):
   user without sudo) makes the broker the only privileged path.
 """
 
+import grp
 import hashlib
 import json
 import os
@@ -36,6 +37,32 @@ import time
 TICKETS_DIR_DEFAULT = "/run/dclawos/tickets"
 SOCKET_PATH_DEFAULT = "/run/dclawos/privileged.sock"
 TICKET_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+# Shared exchange group (module 7): the AI user (dclaw-agent) and the
+# human (dclaw) are both members, so ticket files and dirs created by
+# either side stay usable by the other. Overridable for tests.
+SHARED_GROUP_DEFAULT = "dclawos-session"
+
+
+def shared_group():
+    return os.environ.get("DCLAWOS_SHARED_GROUP", SHARED_GROUP_DEFAULT)
+
+
+def set_shared_group(path):
+    """Best-effort chgrp to the exchange group (skipped if absent)."""
+    try:
+        os.chown(path, -1, grp.getgrnam(shared_group()).gr_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def ensure_dir(path):
+    """Create an exchange dir: shared group + 0770 (best effort)."""
+    os.makedirs(path, exist_ok=True)
+    set_shared_group(path)
+    try:
+        os.chmod(path, 0o770)
+    except OSError:
+        pass
 
 
 def tickets_dir():
@@ -61,6 +88,7 @@ def atomic_write(path, text):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as handle:
         handle.write(text)
+    set_shared_group(tmp)
     try:
         os.chmod(tmp, 0o660)
     except OSError:

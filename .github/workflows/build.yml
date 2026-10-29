@@ -160,6 +160,9 @@ jobs:
             config/includes.chroot/usr/local/bin/dclawos-takeover \
             config/includes.chroot/usr/local/bin/dclawos-takeover-request \
             config/includes.chroot/usr/local/bin/dclawos-gui \
+            config/includes.chroot/usr/local/bin/dclawos-agent-ctl \
+            config/includes.chroot/usr/local/bin/dclawos-monitor \
+            config/includes.chroot/usr/local/bin/dclawos-agent-run \
             config/includes.chroot/usr/local/lib/dclawos/ticketlib.py \
             config/includes.chroot/usr/local/lib/dclawos/takeoverlib.py
           sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
@@ -223,23 +226,26 @@ jobs:
           Build: ${GITHUB_RUN_NUMBER}
           Commit: ${GITHUB_SHA}
 
-          Phase 2 module 6 of the from-scratch reboot: a bootable Debian
+          Phase 2 module 7 of the from-scratch reboot: a bootable Debian
           Bookworm live image with a minimal desktop session (Openbox +
           the DclawOS shell with Wnck window switching, the AI dashboard
           as the default desktop view, and the self-built settings app
           writing org.dclawos.settings directly), the routing engine
-          compiled into the image (module 4) and the privilege broker
-          (module 5), PLUS GUI operation + human takeover: dclawos-gui
-          (list/focus windows via Wnck, send keys/clicks/text via
-          xdotool — session-user actions visible on screen, NOT
-          privileged ops) and the takeover flow (agent writes a request,
-          the dashboard shows a banner, the human completes the step in
-          their own session and marks it in the popup; the backfill
-          carries ONLY outcome + session handle, never credentials —
-          the popup has no password field and the store drops
-          credential-like keys). The editor and MCP/skills management
-          are NOT yet implemented. No full GNOME desktop, no Firefox,
-          no Office, no image/video viewers — by design.
+          (module 4), the privilege broker (module 5) and GUI operation
+          + takeover (module 6), PLUS environment separation +
+          monitoring: the AI runs as its own system user dclaw-agent
+          (no sudo, private home 0750, not in the dclaw/sudo groups) so
+          the ticketed broker becomes its only privileged path; the
+          human home is 0750 too; a shared exchange group
+          (dclawos-session) gates only the exchange paths (broker
+          socket, tickets, takeover store, event stream, X cookie);
+          the monitor (dashboard button) shows agent processes with
+          stop/resume/kill controls — the stop flag is cooperative
+          (takes effect when the agent service checks it; no service
+          exists yet) while the kill is immediate. The editor and
+          MCP/skills management are NOT yet implemented. No full GNOME
+          desktop, no Firefox, no Office, no image/video viewers — by
+          design.
 
           Verify the ISO before writing it to USB:
 

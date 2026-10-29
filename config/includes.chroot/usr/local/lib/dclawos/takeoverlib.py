@@ -21,6 +21,7 @@ Kinds: captcha | login | verification | other (unknown kinds display
 raw; the popup maps the known ones to Chinese labels).
 """
 
+import grp
 import json
 import os
 import re
@@ -35,6 +36,32 @@ FORBIDDEN_RESULT_KEYS = {
     "password", "passwd", "pwd", "credential", "credentials",
     "token", "secret", "api_key", "apikey", "auth", "authorization",
 }
+# Shared exchange group (module 7, same model as ticketlib.py): both
+# the AI user and the human are members, so request files created by
+# either side stay usable by the other. Overridable for tests.
+SHARED_GROUP_DEFAULT = "dclawos-session"
+
+
+def shared_group():
+    return os.environ.get("DCLAWOS_SHARED_GROUP", SHARED_GROUP_DEFAULT)
+
+
+def set_shared_group(path):
+    """Best-effort chgrp to the exchange group (skipped if absent)."""
+    try:
+        os.chown(path, -1, grp.getgrnam(shared_group()).gr_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def ensure_dir(path):
+    """Create an exchange dir: shared group + 0770 (best effort)."""
+    os.makedirs(path, exist_ok=True)
+    set_shared_group(path)
+    try:
+        os.chmod(path, 0o770)
+    except OSError:
+        pass
 
 
 def takeover_dir():
@@ -51,6 +78,7 @@ def _atomic_write(path, text):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as handle:
         handle.write(text)
+    set_shared_group(tmp)
     try:
         os.chmod(tmp, 0o660)
     except OSError:

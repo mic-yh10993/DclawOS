@@ -1,0 +1,53 @@
+#!/bin/sh
+# AI/human environment separation (Phase 2 module 7). Hard-fails on
+# missing prerequisites so a half-separated image cannot ship.
+#
+# Model (see ticketlib.py / takeoverlib.py for the file-level half):
+# - Human: user dclaw, home /home/dclaw 0750 (group dclaw only).
+# - AI: system user dclaw-agent, home /home/dclaw-agent 0750, NO sudo,
+#   NOT in the dclaw or sudo groups, so it cannot traverse /home/dclaw
+#   and cannot escalate except through the ticketed broker (module 5).
+# - Exchange: group dclawos-session (both users are members) gates the
+#   shared paths only: /var/lib/dclawos (0770), the broker socket and
+#   tickets, the takeover store, the event stream and the X cookie
+#   file the human session publishes at login (see autostart).
+#   Nothing human-private lives in the exchange dir.
+set -eu
+
+# Shared exchange group (idempotent: groupadd only if missing).
+if ! getent group dclawos-session >/dev/null 2>&1; then
+    groupadd dclawos-session
+fi
+
+# AI user: system user, own home, locked password (no password login),
+# entered only via sudo -u (manual) or systemd User= (agent service).
+if ! id dclaw-agent >/dev/null 2>&1; then
+    useradd -r -m -s /bin/bash dclaw-agent
+fi
+usermod -aG dclawos-session dclaw-agent
+usermod -aG dclawos-session dclaw
+
+# Homes private (prerequisite: hook 1000 already created dclaw).
+[ -d /home/dclaw ] || {
+    echo "dclawos-separation: missing /home/dclaw" >&2
+    exit 1
+}
+chown dclaw:dclaw /home/dclaw
+chmod 0750 /home/dclaw
+chown dclaw-agent:dclaw-agent /home/dclaw-agent
+chmod 0750 /home/dclaw-agent
+
+# Exchange dir shared (both users create/read files here).
+mkdir -p /var/lib/dclawos
+chown dclaw:dclawos-session /var/lib/dclawos
+chmod 0770 /var/lib/dclawos
+
+# Guards: the AI user must have no sudo path, ever.
+if id -nG dclaw-agent | tr ' ' '\n' | grep -qx 'sudo'; then
+    echo "dclawos-separation: dclaw-agent must not be in sudo" >&2
+    exit 1
+fi
+if grep -rq 'dclaw-agent' /etc/sudoers /etc/sudoers.d 2>/dev/null; then
+    echo "dclawos-separation: dclaw-agent must not appear in sudoers" >&2
+    exit 1
+fi

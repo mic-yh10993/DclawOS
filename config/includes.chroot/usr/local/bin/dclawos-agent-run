@@ -1,0 +1,14 @@
+#!/bin/sh
+# Run a command as the AI user (Phase 2 module 7).
+# Manual testing / human-side tooling: the future agent service runs as
+# dclaw-agent directly (systemd User=) and does not need this wrapper.
+# Requires the caller to be root or dclaw (NOPASSWD sudo in live).
+# Gives the command the live session's X access (DISPLAY + the xauth
+# file the human session publishes at login, see autostart).
+set -eu
+[ $# -ge 1 ] || {
+    echo "usage: dclawos-agent-run <command> [args...]" >&2
+    exit 2
+}
+exec sudo -u dclaw-agent env DISPLAY="${DISPLAY:-:0}" \
+    XAUTHORITY=/var/lib/dclawos/xauth "$@"

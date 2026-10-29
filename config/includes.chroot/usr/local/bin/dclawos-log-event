@@ -8,6 +8,7 @@ is deliberately stdlib-only so any component can emit events without a
 dependency on the dashboard or the agent runtime.
 """
 import argparse
+import grp
 import json
 import os
 import sys
@@ -35,6 +36,19 @@ def main(argv=None):
             os.makedirs(parent, exist_ok=True)
         with open(args.path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # Exchange file (module 7): the agent user must be able to
+        # append too, so keep the file group-shared (best effort).
+        try:
+            os.chown(args.path, -1,
+                     grp.getgrnam(os.environ.get(
+                         "DCLAWOS_SHARED_GROUP",
+                         "dclawos-session")).gr_gid)
+        except (KeyError, OSError):
+            pass
+        try:
+            os.chmod(args.path, 0o660)
+        except OSError:
+            pass
     except OSError as exc:
         print(f"dclawos-log-event: write failed: {exc}", file=sys.stderr)
         return 1

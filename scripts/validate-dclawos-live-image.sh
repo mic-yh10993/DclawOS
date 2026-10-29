@@ -63,6 +63,9 @@ for path in \
     usr/local/bin/dclawos-takeover \
     usr/local/bin/dclawos-takeover-request \
     usr/local/bin/dclawos-gui \
+    usr/local/bin/dclawos-agent-ctl \
+    usr/local/bin/dclawos-monitor \
+    usr/local/bin/dclawos-agent-run \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
     usr/bin/xdotool \
@@ -196,6 +199,74 @@ grep -q 'takeover_banner' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-das
     echo "dashboard lacks the takeover banner" >&2
     exit 1
 }
+# Phase 2 module 7: separation + monitoring. The tools must be valid;
+# the broker must use the shared exchange group; and the separation
+# itself is checked against the image's passwd/group/home modes.
+for tool in dclawos-agent-ctl dclawos-monitor; do
+    unsquashfs -d "$WORK/${tool}-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
+    test -x "$WORK/${tool}-extract/usr/local/bin/${tool}"
+    python3 -m py_compile "$WORK/${tool}-extract/usr/local/bin/${tool}"
+done
+unsquashfs -d "$WORK/agent-run-extract" "$FS" usr/local/bin/dclawos-agent-run >/dev/null 2>&1
+test -x "$WORK/agent-run-extract/usr/local/bin/dclawos-agent-run"
+sh -n "$WORK/agent-run-extract/usr/local/bin/dclawos-agent-run"
+grep -q 'dclawos-monitor' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard lacks the monitor button" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/privbroker-extract" "$FS" usr/local/bin/dclawos-privileged >/dev/null 2>&1
+grep -q 'dclawos-session' "$WORK/privbroker-extract/usr/local/bin/dclawos-privileged" || {
+    echo "broker lacks the shared exchange group" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/passwd-extract" "$FS" etc/passwd >/dev/null 2>&1
+grep -q '^dclaw-agent:' "$WORK/passwd-extract/etc/passwd" || {
+    echo "dclaw-agent user missing from final image" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/group-extract" "$FS" etc/group >/dev/null 2>&1
+GROUP_LINE=$(grep '^dclawos-session:' "$WORK/group-extract/etc/group" || true)
+[ -n "$GROUP_LINE" ] || {
+    echo "dclawos-session group missing" >&2
+    exit 1
+}
+# Members field wrapped in commas so ,dclaw, cannot match dclaw-agent.
+MEMBERS=",${GROUP_LINE##*:},"
+case "$MEMBERS" in
+    *,dclaw,*) ;;
+    *)
+        echo "dclaw missing from dclawos-session" >&2
+        exit 1
+        ;;
+esac
+case "$MEMBERS" in
+    *,dclaw-agent,*) ;;
+    *)
+        echo "dclaw-agent missing from dclawos-session" >&2
+        exit 1
+        ;;
+esac
+unsquashfs -d "$WORK/sudoers-extract" "$FS" etc/sudoers.d >/dev/null 2>&1
+[ -d "$WORK/sudoers-extract/etc/sudoers.d" ] || {
+    echo "sudoers.d missing from final image" >&2
+    exit 1
+}
+if grep -rq 'dclaw-agent' "$WORK/sudoers-extract/etc/sudoers.d" 2>/dev/null; then
+    echo "dclaw-agent must not appear in sudoers" >&2
+    exit 1
+fi
+unsquashfs -d "$WORK/home-extract" "$FS" home/dclaw home/dclaw-agent >/dev/null 2>&1
+for home in dclaw dclaw-agent; do
+    [ -d "$WORK/home-extract/home/${home}" ] || {
+        echo "home dir missing from final image: /home/${home}" >&2
+        exit 1
+    }
+    mode=$(stat -c '%a' "$WORK/home-extract/home/${home}")
+    [ "$mode" = "750" ] || {
+        echo "home dir not 0750: /home/${home} is ${mode}" >&2
+        exit 1
+    }
+done
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 

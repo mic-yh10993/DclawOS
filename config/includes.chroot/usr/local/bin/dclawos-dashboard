@@ -27,6 +27,7 @@ Reuse notes (evaluation cards §2, step 0 retrieval):
   has no inotify; a 500ms mtime/size poll gives the same refresh cadence
   as the notes' "inotify + 500ms aggregation" with zero new dependencies.
 """
+import grp
 import json
 import os
 import subprocess
@@ -70,8 +71,24 @@ def append_event(event):
         os.makedirs(os.path.dirname(EVENTS_PATH), exist_ok=True)
         with open(EVENTS_PATH, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # Exchange file (module 7): the agent user must be able to
+        # append too, so keep the file group-shared (best effort).
+        _share_event_file()
     except Exception as exc:
         log(f"event append failed (non-fatal): {exc}")
+
+
+def _share_event_file():
+    try:
+        os.chown(EVENTS_PATH, -1,
+                 grp.getgrnam(os.environ.get(
+                     "DCLAWOS_SHARED_GROUP", "dclawos-session")).gr_gid)
+    except (KeyError, OSError):
+        pass
+    try:
+        os.chmod(EVENTS_PATH, 0o660)
+    except OSError:
+        pass
 
 
 class Dashboard(Gtk.Window):
@@ -94,6 +111,11 @@ class Dashboard(Gtk.Window):
         self.takeover_banner.set_no_show_all(True)
         self.takeover_banner.connect("clicked", self.open_takeover)
         box.pack_start(self.takeover_banner, False, False, 0)
+
+        # Module 7 monitor button: the human's watch + stop controls.
+        monitor_btn = Gtk.Button(label="监视 AI（进程与叫停）")
+        monitor_btn.connect("clicked", self.open_monitor)
+        box.pack_start(monitor_btn, False, False, 0)
 
         self.store = Gtk.ListStore(str, str, str, str)
         tree = Gtk.TreeView(model=self.store)
@@ -120,6 +142,12 @@ class Dashboard(Gtk.Window):
             subprocess.Popen(["dclawos-takeover"])
         except OSError as exc:
             log(f"takeover popup launch failed: {exc}")
+
+    def open_monitor(self, _button):
+        try:
+            subprocess.Popen(["dclawos-monitor"])
+        except OSError as exc:
+            log(f"monitor launch failed: {exc}")
 
     def poll_takeover(self):
         if takeoverlib is None:
