@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""DclawOS AI dashboard (Phase 2 module 2): the default desktop view.
+
+Shows the AI's live operations as an event stream: commands run, files
+modified, tokens / model statistics, approvals, takeovers, system notes.
+Events arrive through /var/lib/dclawos/events.jsonl (one JSON object per
+line: ts, type, summary, session), written by the agent service (later
+modules) or by dclawos-log-event. The dashboard only READS the file — it
+never calls an agent API (cards §2 decoupling) — and refreshes on a 500ms
+tick, which is also the throttle: the UI never refreshes per-event, only
+per tick (cards §2 throttling row).
+
+Reuse notes (evaluation cards §2, step 0 retrieval):
+- Dashboard shell itself: self-written. No reference repo has a desktop
+  dashboard: `grep -rni "dashboard" gnome-shell/js/ui/` hits nothing, and
+  openclaw's session views target the gateway web layer, not a desktop
+  shell — retrieval is the proof, see the cards.
+- Event-source rows are adapted, not copied: command receipts follow the
+  openclaw operator-approval-store receipt shape (retention + summary
+  caps); file rows follow the diff-model idea (vscode diffEditorModel);
+  tokens/model rows aggregate omniroute smartRouting outputs
+  (routing_explanation, cost_envelope) into per-session statistics.
+// reuse-check: openclaw gateway session views NOT adopted, reason: they
+  target the gateway web layer; the user forbids web management, so the
+  dashboard is a native GTK3 view over a local file.
+// reuse-check: no inotify binding is introduced, reason: Python stdlib
+  has no inotify; a 500ms mtime/size poll gives the same refresh cadence
+  as the notes' "inotify + 500ms aggregation" with zero new dependencies.
+"""
+import json
+import os
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+EVENTS_PATH = "/var/lib/dclawos/events.jsonl"
+POLL_MS = 500
+MAX_ROWS = 500
+TYPE_LABELS = {
+    "command": "命令",
+    "file": "文件",
+    "tokens": "tokens",
+    "model": "模型",
+    "approval": "审批",
+    "takeover": "接管",
+    "system": "系统",
+}
+
+
+def log(msg):
+    print(f"dclawos-dashboard: {msg}", flush=True)
+
+
+def append_event(event):
+    """Append one event dict to the stream (best effort, never fatal)."""
+    try:
+        os.makedirs(os.path.dirname(EVENTS_PATH), exist_ok=True)
+        with open(EVENTS_PATH, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log(f"event append failed (non-fatal): {exc}")
+
+
+class Dashboard(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-dashboard")
+        self.set_default_size(1024, 700)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        header = Gtk.Label(label="AI 看板 — AI 正在进行的操作（实时事件流）")
+        header.set_halign(Gtk.Align.START)
+        box.pack_start(header, False, False, 0)
+
+        self.store = Gtk.ListStore(str, str, str, str)
+        tree = Gtk.TreeView(model=self.store)
+        for index, title in enumerate(("时间", "类型", "摘要", "会话")):
+            column = Gtk.TreeViewColumn(
+                title, Gtk.CellRendererText(), text=index)
+            column.set_resizable(True)
+            if index == 2:
+                column.set_expand(True)
+            tree.append_column(column)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.add(tree)
+        box.pack_start(scrolled, True, True, 0)
+        self.scrolled = scrolled
+
+        self.offset = 0
+        self.placeholder = None
+        self.show_placeholder()
+        GLib.timeout_add(POLL_MS, self.poll_events)
+
+    def show_placeholder(self):
+        if self.placeholder is None:
+            self.placeholder = self.store.append(
+                ("--", "系统", "暂无事件，等待 agent 写入事件流", ""))
+        return True
+
+    def clear_placeholder(self):
+        if self.placeholder is not None:
+            try:
+                self.store.remove(self.placeholder)
+            except Exception:
+                pass
+            self.placeholder = None
+
+    def poll_events(self):
+        try:
+            size = os.path.getsize(EVENTS_PATH)
+        except OSError:
+            return True
+        if size < self.offset:
+            # Stream truncated or rotated: restart from the beginning.
+            self.offset = 0
+        if size == self.offset:
+            return True
+        try:
+            with open(EVENTS_PATH, "r", encoding="utf-8") as handle:
+                handle.seek(self.offset)
+                chunk = handle.read()
+                self.offset = handle.tell()
+        except OSError as exc:
+            log(f"event read failed: {exc}")
+            return True
+        added = 0
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            self.clear_placeholder()
+            ts = event.get("ts", 0)
+            try:
+                when = time.strftime("%H:%M:%S", time.localtime(int(ts)))
+            except (ValueError, TypeError):
+                when = "--"
+            kind = TYPE_LABELS.get(str(event.get("type", "")),
+                                   str(event.get("type", "")))
+            self.store.append((when, kind,
+                               str(event.get("summary", "")),
+                               str(event.get("session", ""))))
+            added += 1
+        if added:
+            # Cap the view (oldest rows drop) so a long session cannot
+            # grow the UI unboundedly — part of the throttling contract.
+            while len(self.store) > MAX_ROWS:
+                first = self.store.get_iter_first()
+                if first is None:
+                    break
+                self.store.remove(first)
+            # Scroll to the newest row (dashboard semantics: live tail).
+            if len(self.store) > 0:
+                path = self.store.get_path(
+                    self.store.iter_nth_child(None, len(self.store) - 1))
+                GLib.idle_add(self.scroll_to, path)
+        return True
+
+    def scroll_to(self, path):
+        try:
+            tree = self.scrolled.get_child()
+            tree.scroll_to_cell(path, None, False, 0.0, 0.0)
+        except Exception:
+            pass
+        return False
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-dashboard (reads /var/lib/dclawos/events.jsonl)")
+        return 0
+    log("dclawos-dashboard started (Phase 2 module 2: event stream)")
+    append_event({"ts": int(time.time()), "type": "system",
+                  "summary": "AI 看板已启动，等待 agent 事件", "session": ""})
+    win = Dashboard()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.maximize()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

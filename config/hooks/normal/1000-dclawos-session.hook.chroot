@@ -12,6 +12,14 @@ useradd -m -s /bin/bash -G sudo dclaw || true
 printf '%s\n' 'dclaw ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/dclawos-live
 chmod 440 /etc/sudoers.d/dclawos-live
 
+# AI event stream directory (Phase 2 module 2): the dashboard and the
+# agent service exchange events via /var/lib/dclawos/events.jsonl. Owned
+# by the live user so both the session dashboard and user-level agent
+# components can append without privilege escalation.
+mkdir -p /var/lib/dclawos
+chown dclaw:dclaw /var/lib/dclawos 2>/dev/null || true
+chmod 755 /var/lib/dclawos
+
 printf '%s\n' 'dclawos' > /etc/hostname
 if ! grep -q 'dclawos' /etc/hosts 2>/dev/null; then
     printf '%s\n' '127.0.1.1 dclawos' >> /etc/hosts

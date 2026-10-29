@@ -4,3 +4,6 @@
 # journald forwards the system journal to the serial console.
 logger -t dclawos-session "openbox autostart: launching dclawos-shell"
 dclawos-shell &
+# The AI dashboard is the default desktop view (Phase 2 module 2): it
+# starts maximized (the taskbar strut keeps it clear of the taskbar).
+dclawos-dashboard &

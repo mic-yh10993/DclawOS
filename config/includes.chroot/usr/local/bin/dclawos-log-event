@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Append one event to the DclawOS AI event stream (Phase 2 module 2).
+
+Usage: dclawos-log-event <type> <summary> [--session ID]
+Writes one JSON line to /var/lib/dclawos/events.jsonl. The dashboard
+(module 2) and later the agent service both use this format; the writer
+is deliberately stdlib-only so any component can emit events without a
+dependency on the dashboard or the agent runtime.
+"""
+import argparse
+import json
+import os
+import sys
+import time
+
+DEFAULT_PATH = "/var/lib/dclawos/events.jsonl"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Append one event to the DclawOS event stream.")
+    parser.add_argument("type", help="event type: command, file, tokens, "
+                        "model, approval, takeover, system")
+    parser.add_argument("summary", help="one-line human-readable summary")
+    parser.add_argument("--session", default="",
+                        help="agent session id (may be empty)")
+    parser.add_argument("--path", default=DEFAULT_PATH,
+                        help="event file (default: %(default)s)")
+    args = parser.parse_args(argv)
+    event = {"ts": int(time.time()), "type": args.type,
+             "summary": args.summary, "session": args.session}
+    try:
+        parent = os.path.dirname(args.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(args.path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"dclawos-log-event: write failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

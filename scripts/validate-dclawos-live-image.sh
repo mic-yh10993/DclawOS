@@ -54,6 +54,9 @@ unsquashfs -l "$FS" > "$LIST"
 # Phase-1 session-critical paths must be present in the final image.
 for path in \
     usr/local/bin/dclawos-shell \
+    usr/local/bin/dclawos-dashboard \
+    usr/local/bin/dclawos-log-event \
+    var/lib/dclawos \
     etc/lightdm/lightdm.conf.d/70-dclawos-autologin.conf \
     etc/xdg/openbox/autostart \
     usr/share/dclawos/release \
@@ -96,6 +99,19 @@ grep -q 'activate_window' "$SHELL_EXTRACT" || {
 }
 grep -q 'Wnck' "$SHELL_EXTRACT" || {
     echo "Wnck import missing from final image shell" >&2
+    exit 1
+}
+# Phase 2 module 2: dashboard + event writer must be executable and
+# syntactically valid Python (same rule as the shell above).
+for tool in dclawos-dashboard dclawos-log-event; do
+    unsquashfs -d "$WORK/${tool}-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
+    test -x "$WORK/${tool}-extract/usr/local/bin/${tool}"
+    python3 -m py_compile "$WORK/${tool}-extract/usr/local/bin/${tool}"
+done
+# The dashboard must be autostarted: it IS the default desktop view.
+unsquashfs -d "$WORK/autostart-extract" "$FS" etc/xdg/openbox/autostart >/dev/null 2>&1
+grep -q 'dclawos-dashboard' "$WORK/autostart-extract/etc/xdg/openbox/autostart" || {
+    echo "dashboard missing from session autostart" >&2
     exit 1
 }
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
