@@ -175,7 +175,10 @@ class Taskbar(Gtk.Window):
     def on_realize(self, _widget):
         """Reserve the bottom strip so maximized windows do not cover us.
 
-        Sets _NET_WM_STRUT_PARTIAL (bottom) + _NET_WM_STRUT. If this fails
+        Sets _NET_WM_STRUT_PARTIAL (bottom) + _NET_WM_STRUT. The width
+        comes from the SCREEN, not the window: at realize time the window
+        has no reliable allocated size yet, and a wrong bottom_end_x would
+        silently break the maximized-window reservation. If this fails
         (non-compliant WM), the taskbar still renders and stays above
         normal windows via DOCK + keep_above; only the maximized-window
         reservation degrades. Guarded so a strut failure never kills the
@@ -185,7 +188,8 @@ class Taskbar(Gtk.Window):
             window = self.get_window()
             if window is None:
                 return
-            width = window.get_width() or 1024
+            screen = Gdk.Screen.get_default()
+            width = screen.get_width() if screen else 1024
             bottom = TASKBAR_HEIGHT
             strut_partial = [0, 0, 0, bottom,
                              0, 0, 0, 0,
