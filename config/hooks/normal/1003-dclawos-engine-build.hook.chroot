@@ -35,7 +35,12 @@ STAGE=/tmp/dclawos-engine-build
 
 # 1. Node 24 runtime (kept in the image for the agent service).
 if [ ! -x "$NODE_DIR/bin/node" ]; then
-    curl --retry 3 -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz
+    # NOTE: the tarball MUST keep its dist filename: SHASUMS256.txt
+    # references that name, and sha256sum -c resolves it relative to
+    # cwd. Saving under a different name (run 12 lesson) makes the
+    # checksum step fail with "No such file or directory".
+    TARBALL="/tmp/node-${NODE_VERSION}-linux-x64.tar.xz"
+    curl --retry 3 -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz" -o "$TARBALL"
     curl --retry 3 -fsSL "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
     LINE=$(grep "node-${NODE_VERSION}-linux-x64.tar.xz" /tmp/SHASUMS256.txt || true)
     [ -n "$LINE" ] || {
@@ -44,8 +49,8 @@ if [ ! -x "$NODE_DIR/bin/node" ]; then
     }
     printf '%s\n' "$LINE" | (cd /tmp && sha256sum -c -)
     mkdir -p "$NODE_DIR"
-    tar -xJf /tmp/node.tar.xz -C "$NODE_DIR" --strip-components=1
-    rm -f /tmp/node.tar.xz /tmp/SHASUMS256.txt
+    tar -xJf "$TARBALL" -C "$NODE_DIR" --strip-components=1
+    rm -f "$TARBALL" /tmp/SHASUMS256.txt
 fi
 "$NODE_DIR/bin/node" --version | grep -q '^v24\.' || {
     echo "dclawos-engine: unexpected node version" >&2
