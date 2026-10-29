@@ -51,11 +51,11 @@ insmod linux
 insmod normal
 search --no-floppy --file --set=root /live/vmlinuz
 menuentry "Start DclawOS Live" {
-  linux /live/vmlinuz boot=live config components
+  linux /live/vmlinuz boot=live config components console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
   initrd /live/initrd.img
 }
 menuentry "DclawOS Live (safe graphics)" {
-  linux /live/vmlinuz boot=live config components nomodeset
+  linux /live/vmlinuz boot=live config components nomodeset console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
   initrd /live/initrd.img
 }
 EOF
@@ -69,11 +69,9 @@ mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
 mcopy -i "$EFI_IMG" "$EFI_BIN" ::/EFI/BOOT/BOOTX64.EFI
 
 # -iso-level 3: xorriso's mkisofs emulation caps single files at 4GiB-1 by
-# default; level 3 raises the limit to 400GiB-200KiB. Required since
-# binary/live/filesystem.squashfs passed 4GiB (ONLYOFFICE integration).
-# Boot assets (isolinux, kernel, initrd, efi.img) stay small; the squashfs
-# is stored as a multi-extent file, which Linux isofs reads transparently.
-xorriso -as mkisofs -r -J -iso-level 3 -V "DCLAWOS 1.0" \
+# default; level 3 raises the limit to 400GiB-200KiB, so a large squashfs
+# stays a multi-extent file that Linux isofs reads transparently.
+xorriso -as mkisofs -r -J -iso-level 3 -V "DCLAWOS 2.0" \
     -o "$REPACKED" \
     -b isolinux/isolinux.bin -c isolinux/boot.cat \
     -no-emul-boot -boot-load-size 4 -boot-info-table \

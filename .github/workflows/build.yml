@@ -98,6 +98,13 @@ jobs:
           # lb config command below; bash strips the backslash-newline before
           # parsing comments, which terminates the command early and turns the
           # next flag (e.g. --compression) into a "command not found" (exit 127).
+          # live-build's iso-hybrid finalization calls `isohybrid`, which
+          # fails on the runner with "isohybrid: not found" even though
+          # syslinux-utils (which ships /usr/bin/isohybrid) is installed
+          # (run 40879598397). The repack step below rebuilds the ISO from
+          # the binary tree with xorriso -isohybrid-gpt-basdat anyway, so
+          # live-build's own hybrid step is redundant: build a plain iso
+          # here and let repack produce the dual-boot hybrid.
           sudo GENISOIMAGE_OPTIONS_EXTRA="-allow-limited-size" lb config \
             --ignore-system-defaults \
             --mode debian \
@@ -120,7 +127,7 @@ jobs:
             --security false \
             --mirror-debian-installer "http://deb.debian.org/debian" \
             --keyring-packages "debian-archive-keyring" \
-            --binary-images iso-hybrid \
+            --binary-images iso \
             --compression gzip \
             --bootappend-live "components splash console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1" \
             --iso-application "DclawOS Live" \
@@ -160,7 +167,7 @@ jobs:
           sudo lb build 2>&1 | tee -a build.log
           sudo rm -rf chroot chroot.tmp 2>/dev/null || true
           df -h /
-          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name 'live-image-amd64.iso' -o -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
           test -n "$ISO_SOURCE"
           chmod 755 scripts/repack-dclawos-dualboot-iso.sh
           DCLAWOS_BINARY_TREE="$GITHUB_WORKSPACE/binary" \
@@ -179,7 +186,7 @@ jobs:
         id: iso
         run: |
           set -euxo pipefail
-          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name 'live-image-amd64.iso' -o -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
           test -n "$ISO_SOURCE"
           test -s "$ISO_SOURCE"
           ISO="DclawOS-2.0-amd64-livecd.iso"
