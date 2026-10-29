@@ -51,11 +51,11 @@ insmod linux
 insmod normal
 search --no-floppy --file --set=root /live/vmlinuz
 menuentry "Start DclawOS Live" {
-  linux /live/vmlinuz boot=live config components console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
+  linux /live/vmlinuz boot=live config components live-config.username=dclaw console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
   initrd /live/initrd.img
 }
 menuentry "DclawOS Live (safe graphics)" {
-  linux /live/vmlinuz boot=live config components nomodeset console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
+  linux /live/vmlinuz boot=live config components nomodeset live-config.username=dclaw console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1
   initrd /live/initrd.img
 }
 EOF
