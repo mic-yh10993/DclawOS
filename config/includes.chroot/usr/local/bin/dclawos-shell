@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""DclawOS shell, Phase 1 stub: bottom taskbar.
+"""DclawOS shell: bottom taskbar with window switching (Phase 2 module 1).
 
 Renders the bottom taskbar (always on top, full screen width) with the four
-confirmed slots — AI dashboard, Settings, Terminal, Chromium — plus a clock
-and a version label. Slot buttons are NOT wired yet: clicking one only logs
-the click (Phase 2 wires switching via the window manager).
+confirmed slots — AI dashboard, Settings, Terminal, Chromium — plus a clock,
+a battery label (when UPower reports one) and a version label. Clicking a
+slot activates that app's window, or launches it when it has no window yet.
 
 Reuse notes (evaluation cards §1, step 0 retrieval):
 - Taskbar shell itself: self-written. gnome-shell has NO bottom taskbar
@@ -12,15 +12,30 @@ Reuse notes (evaluation cards §1, step 0 retrieval):
   only hits skip_taskbar flags (altTab.js, appMenu.js,
   windowAttentionHandler.js) — retrieval is the proof, see the cards.
 - Status-area aggregation pattern (D-Bus subscriptions + menu aggregation)
-  is adapted from gnome-shell/js/ui/panel.js statusArea in Phase 2; this
-  stub intentionally contains no status icons yet.
-- Fullscreen switching / always-on-top call the compositor (mutter rows in
-  the cards) in Phase 2; here keep_above + DOCK hint are the Openbox-level
-  equivalents, not a copy of mutter code.
-// reuse-check: gnome-shell/js/ui/panel.js:470 statusArea not adopted yet,
-  reason: Phase 1 stub renders no status icons; pattern lands with §1 status
-  row in Phase 2.
+  is adapted from gnome-shell/js/ui/panel.js statusArea (Panel:445,
+  statusArea:470) and js/ui/status/system.js (UPower D-Bus proxy): here the
+  battery label reads org.freedesktop.UPower DisplayDevice over D-Bus.
+  Network/volume status rows are NOT added here: the image has no
+  NetworkManager GUI / volume daemon wired yet; adding fake status would
+  be dishonest. They land when their backends land.
+- Window activation / fullscreen / above call the compositor (cards §1
+  mutter rows: window.c make_fullscreen:8800, make_above:3717, activate:
+  4041). Phase 2's compositor is Openbox (X11), so the concrete calls are
+  the Wnck/EWMH equivalents (wnck_window_activate, wnck_window_maximize,
+  wnck_window_make_above) — same "call the compositor, do not copy it"
+  verdict, different system-package compositor. See PHASE2-NOTES §1.
+// reuse-check: gnome-shell/js/ui/panel.js:470 statusArea adopted as
+  pattern only (D-Bus subscription + aggregation), reason: GNOME's top-bar
+  St widgets and Shell Main cannot be reused in a GTK3 Openbox taskbar.
+// reuse-check: mutter/src/core/window.c:8800 make_fullscreen NOT called
+  literally, reason: under Openbox a real fullscreen window covers the
+  DOCK taskbar, which would violate the user-confirmed "taskbar always on
+  top". Fullscreen mode therefore maximizes the window and reserves the
+  bottom 48px via _NET_WM_STRUT_PARTIAL (visually fullscreen except the
+  taskbar); windowed mode unmaximizes instead. A future Wayland + mutter
+  migration can use true fullscreen + layer-shell to satisfy both at once.
 """
+import shutil
 import subprocess
 import sys
 import time
@@ -28,10 +43,28 @@ import time
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, Gtk, GLib  # noqa: E402
+from gi.repository import Gdk, Gtk, GLib, Gio  # noqa: E402
 
-SLOTS = ["AI 看板", "设置", "终端", "Chromium"]
-VERSION_LABEL = "DclawOS 2.0 · Phase 1"
+try:
+    gi.require_version("Wnck", "3.0")
+    from gi.repository import Wnck  # noqa: E402
+    HAVE_WNCK = True
+except Exception:
+    Wnck = None
+    HAVE_WNCK = False
+
+# Slot label -> (launch command, Wnck window-class hint for pre-existing
+# windows). Dashboard / settings / Chromium binaries land in later modules;
+# until then clicking their slot logs "not installed yet" instead of
+# crashing (honest placeholder, same rule as Phase 1).
+SLOTS = [
+    ("AI 看板", "dclawos-dashboard", "dclawos-dashboard"),
+    ("设置", "dclawos-settings", "dclawos-settings"),
+    ("终端", "xterm", "XTerm"),
+    ("Chromium", "chromium", "Chromium"),
+]
+TASKBAR_HEIGHT = 48
+VERSION_LABEL = "DclawOS 2.0"
 
 
 def log(msg):
@@ -41,6 +74,41 @@ def log(msg):
     except Exception:
         pass
     print(f"dclawos-shell: {msg}", flush=True)
+
+
+def get_window_mode():
+    """Window mode from the DclawOS settings schema (module 3).
+
+    Returns 'fullscreen' or 'windowed'. Before module 3 installs the
+    schema, Gio.Settings raises and we fall back to 'fullscreen' (the
+    user-confirmed default), so no throwaway config format is needed.
+    """
+    try:
+        settings = Gio.Settings.new("org.dclawos.settings")
+        mode = settings.get_string("window-mode")
+        if mode in ("fullscreen", "windowed"):
+            return mode
+    except Exception:
+        pass
+    return "fullscreen"
+
+
+def get_battery_percent():
+    """Battery percentage via UPower DisplayDevice, or None if unavailable."""
+    try:
+        proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+            "org.freedesktop.UPower",
+            "/org/freedesktop/UPower/devices/DisplayDevice",
+            "org.freedesktop.UPower.Device", None)
+        percent = proxy.get_cached_property("Percentage")
+        if percent is not None:
+            value = percent.unpack()
+            if value and value > 0:
+                return int(value)
+    except Exception:
+        pass
+    return None
 
 
 class Taskbar(Gtk.Window):
@@ -56,47 +124,222 @@ class Taskbar(Gtk.Window):
 
         screen = Gdk.Screen.get_default()
         width = screen.get_width() if screen else 1024
-        height = 48
+        height = TASKBAR_HEIGHT
         self.set_default_size(width, height)
         self.move(0, (screen.get_height() if screen else 768) - height)
         self.set_size_request(width, height)
+        self.connect("realize", self.on_realize)
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.set_border_width(6)
         self.add(bar)
 
-        for slot in SLOTS:
-            button = Gtk.Button(label=slot)
-            button.connect("clicked", self.on_slot_clicked, slot)
+        self.slot_buttons = {}
+        for label, _command, _hint in SLOTS:
+            button = Gtk.Button(label=label)
+            button.connect("clicked", self.on_slot_clicked, label)
             bar.pack_start(button, False, False, 0)
+            self.slot_buttons[label] = button
 
         spacer = Gtk.Box()
         bar.pack_start(spacer, True, True, 0)
 
+        self.battery = Gtk.Label(label="")
+        bar.pack_end(self.battery, False, False, 0)
         self.clock = Gtk.Label(label="")
         bar.pack_end(self.clock, False, False, 0)
         version = Gtk.Label(label=VERSION_LABEL)
         bar.pack_end(version, False, False, 0)
         GLib.timeout_add_seconds(1, self.tick_clock)
         self.tick_clock()
+        GLib.timeout_add_seconds(30, self.tick_battery)
+        self.tick_battery()
+
+        # Launched PIDs per slot label, for matching windows to slots.
+        self.launched_pids = {}
+        # Window XIDs per slot label, resolved from launched PIDs.
+        self.slot_windows = {}
+
+        if HAVE_WNCK:
+            self.wnck_screen = Wnck.Screen.get_default()
+            if self.wnck_screen is not None:
+                self.wnck_screen.force_update()
+                self.wnck_screen.connect("window-opened", self.on_window_opened)
+                self.wnck_screen.connect("window-closed", self.on_window_closed)
+                self.wnck_screen.connect(
+                    "active-window-changed", self.on_active_window_changed)
+        else:
+            self.wnck_screen = None
+            log("Wnck unavailable: switching degraded to Phase 1 logging")
+
+    def on_realize(self, _widget):
+        """Reserve the bottom strip so maximized windows do not cover us.
+
+        Sets _NET_WM_STRUT_PARTIAL (bottom) + _NET_WM_STRUT. If this fails
+        (non-compliant WM), the taskbar still renders and stays above
+        normal windows via DOCK + keep_above; only the maximized-window
+        reservation degrades. Guarded so a strut failure never kills the
+        shell (the QEMU boot frame gate depends on the shell starting).
+        """
+        try:
+            window = self.get_window()
+            if window is None:
+                return
+            width = window.get_width() or 1024
+            bottom = TASKBAR_HEIGHT
+            strut_partial = [0, 0, 0, bottom,
+                             0, 0, 0, 0,
+                             0, 0, 0, width - 1]
+            window.property_change(
+                Gdk.atom_intern("_NET_WM_STRUT_PARTIAL", False),
+                Gdk.atom_intern("CARDINAL", False), 32,
+                Gdk.PropMode.REPLACE, strut_partial)
+            window.property_change(
+                Gdk.atom_intern("_NET_WM_STRUT", False),
+                Gdk.atom_intern("CARDINAL", False), 32,
+                Gdk.PropMode.REPLACE, [0, 0, 0, bottom])
+        except Exception as exc:
+            log(f"strut setup failed (degraded): {exc}")
 
     def tick_clock(self):
         self.clock.set_text(time.strftime("%H:%M:%S"))
         return True
 
-    def on_slot_clicked(self, _button, slot):
-        # Phase 1 stub: switching is wired in Phase 2 (§1 rows).
-        log(f"slot clicked (Phase 1 stub, not wired yet): {slot}")
+    def tick_battery(self):
+        percent = get_battery_percent()
+        if percent is None:
+            self.battery.hide()
+        else:
+            self.battery.set_text(f"电池 {percent}%")
+            self.battery.show()
+        return True
+
+    def wnck_windows(self):
+        if self.wnck_screen is None:
+            return []
+        try:
+            self.wnck_screen.force_update()
+            return [w for w in self.wnck_screen.get_windows()
+                    if not w.is_skip_taskbar()
+                    and w.get_name() != "dclawos-shell"]
+        except Exception:
+            return []
+
+    def find_window_for_slot(self, label, command, class_hint):
+        """Find the live window for a slot, or None.
+
+        Prefers windows spawned by this taskbar (tracked PID), then
+        pre-existing windows whose class matches the slot's hint.
+        """
+        pid = self.launched_pids.get(label)
+        for window in self.wnck_windows():
+            try:
+                if pid is not None and window.get_pid() == pid:
+                    return window
+                if window.get_class_group_name() == class_hint:
+                    return window
+            except Exception:
+                continue
+        return None
+
+    def on_window_opened(self, _screen, window):
+        try:
+            pid = window.get_pid()
+        except Exception:
+            return
+        for label, launched in list(self.launched_pids.items()):
+            if launched == pid:
+                self.slot_windows[label] = window.get_xid()
+                log(f"slot window opened: {label} (pid {pid})")
+
+    def on_window_closed(self, _screen, window):
+        try:
+            xid = window.get_xid()
+        except Exception:
+            return
+        for label, known in list(self.slot_windows.items()):
+            if known == xid:
+                del self.slot_windows[label]
+                log(f"slot window closed: {label}")
+
+    def on_active_window_changed(self, _screen, previous):
+        active = None
+        try:
+            if self.wnck_screen is not None:
+                active = self.wnck_screen.get_active_window()
+        except Exception:
+            active = None
+        active_xid = None
+        if active is not None:
+            try:
+                active_xid = active.get_xid()
+            except Exception:
+                active_xid = None
+        for label, button in self.slot_buttons.items():
+            if label in self.slot_windows and \
+                    self.slot_windows[label] == active_xid:
+                button.set_label(f"▶ {label}")
+            else:
+                button.set_label(label)
+
+    def on_slot_clicked(self, _button, label):
+        command = class_hint = None
+        for slot_label, slot_command, slot_hint in SLOTS:
+            if slot_label == label:
+                command, class_hint = slot_command, slot_hint
+                break
+        if command is None:
+            return
+        if not HAVE_WNCK or self.wnck_screen is None:
+            log(f"slot clicked (Wnck unavailable, not wired): {label}")
+            return
+        window = self.find_window_for_slot(label, command, class_hint)
+        if window is not None:
+            self.activate_window(window)
+            return
+        if shutil.which(command) is None:
+            log(f"slot not installed yet (lands in its module): {label} "
+                f"({command})")
+            return
+        try:
+            proc = subprocess.Popen([command])
+            self.launched_pids[label] = proc.pid
+            log(f"slot launched: {label} ({command}, pid {proc.pid})")
+        except Exception as exc:
+            log(f"slot launch failed: {label} ({command}): {exc}")
+
+    def activate_window(self, window):
+        """Activate a window per the current window mode.
+
+        Fullscreen mode: maximize (plus the taskbar's bottom strut, set in
+        on_realize) so the app fills the screen except the always-on-top
+        taskbar. Windowed mode: unmaximize and plain-activate. See the
+        module docstring for why true fullscreen is not used here.
+        """
+        try:
+            mode = get_window_mode()
+            if mode == "fullscreen":
+                window.maximize()
+            else:
+                window.unmaximize()
+            window.activate(Gtk.get_current_event_time())
+            log(f"window activated (mode={mode}): {window.get_name()}")
+        except Exception as exc:
+            log(f"window activation failed: {exc}")
 
 
 def main():
     if not Gdk.Display.get_default():
         print("dclawos-shell: no display available", file=sys.stderr)
         return 1
-    log("dclawos-shell started (Phase 1 stub)")
+    log("dclawos-shell started (Phase 2 module 1: Wnck switching)")
     win = Taskbar()
     win.connect("destroy", Gtk.main_quit)
     win.show_all()
+    # Battery label starts hidden; tick_battery shows it only when a
+    # battery exists (QEMU has none, so the boot frame is unchanged).
+    if get_battery_percent() is None:
+        win.battery.hide()
     Gtk.main()
     return 0
 

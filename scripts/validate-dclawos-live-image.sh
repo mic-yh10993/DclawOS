@@ -86,6 +86,18 @@ unsquashfs -d "$WORK/shell-extract" "$FS" usr/local/bin/dclawos-shell >/dev/null
 cp "$WORK/shell-extract/usr/local/bin/dclawos-shell" "$SHELL_EXTRACT"
 test -x "$SHELL_EXTRACT"
 python3 -m py_compile "$SHELL_EXTRACT"
+# Phase 2 module 1 wiring presence check. This is NOT a behavior test:
+# Wnck switching needs a live X session, which this host-side gate cannot
+# provide. It only proves the switching symbols survived into the final
+# image (a revert to the Phase 1 logging stub would fail here).
+grep -q 'activate_window' "$SHELL_EXTRACT" || {
+    echo "taskbar switching wiring missing from final image" >&2
+    exit 1
+}
+grep -q 'Wnck' "$SHELL_EXTRACT" || {
+    echo "Wnck import missing from final image shell" >&2
+    exit 1
+}
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 
