@@ -68,6 +68,7 @@ for path in \
     usr/local/bin/dclawos-agent-run \
     usr/local/bin/dclawos-editor \
     usr/local/lib/dclawos/modifiedfiles.py \
+    usr/local/lib/dclawos/registrylib.py \
     usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.typelib \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
@@ -142,6 +143,17 @@ grep -q 'dclawos-dashboard' "$WORK/autostart-extract/etc/xdg/openbox/autostart" 
 unsquashfs -d "$WORK/settings-extract" "$FS" usr/local/bin/dclawos-settings >/dev/null 2>&1
 test -x "$WORK/settings-extract/usr/local/bin/dclawos-settings"
 python3 -m py_compile "$WORK/settings-extract/usr/local/bin/dclawos-settings"
+# Phase 2 module 9: settings must wire the unified skills/MCP registry.
+grep -q 'registrylib' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks the unified registry wiring" >&2
+    exit 1
+}
+grep -q 'mcp_servers' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks the MCP registry wiring" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/registrylib-extract" "$FS" usr/local/lib/dclawos/registrylib.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/registrylib-extract/usr/local/lib/dclawos/registrylib.py"
 # Phase 2 module 4: routing engine bundle must exist, expose the
 # decision API, and ship a valid catalog (presence + API + JSON gates;
 # the build-time hook already ran the real behavior selftest inside

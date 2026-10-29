@@ -165,6 +165,7 @@ jobs:
             config/includes.chroot/usr/local/bin/dclawos-agent-run \
             config/includes.chroot/usr/local/bin/dclawos-editor \
             config/includes.chroot/usr/local/lib/dclawos/modifiedfiles.py \
+            config/includes.chroot/usr/local/lib/dclawos/registrylib.py \
             config/includes.chroot/usr/local/lib/dclawos/ticketlib.py \
             config/includes.chroot/usr/local/lib/dclawos/takeoverlib.py
           sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
@@ -228,24 +229,26 @@ jobs:
           Build: ${GITHUB_RUN_NUMBER}
           Commit: ${GITHUB_SHA}
 
-          Phase 2 module 8 of the from-scratch reboot: a bootable Debian
+          Phase 2 module 9 of the from-scratch reboot: a bootable Debian
           Bookworm live image with a minimal desktop session (Openbox +
           the DclawOS shell with Wnck window switching, the AI dashboard
           as the default desktop view, and the self-built settings app
           writing org.dclawos.settings directly), the routing engine
           (module 4), the privilege broker (module 5), GUI operation +
           takeover (module 6) and separation + monitoring (module 7),
-          PLUS the editor: native GTK code editing (GtkSourceView:
-          syntax highlighting, line numbers, find, save with dirty
-          guard), an agent-modified-files sidebar, and a native
-          side-by-side diff (stdlib difflib, no browser). Deliberate
-          deviation from the evaluation card's Monaco component: Monaco
-          needs a browser DOM, i.e. a web view, which the binding
-          constraints forbid — so the editor role is filled natively
-          and the editor never embeds a terminal (per Q7 it opens the
-          system xterm at the file's directory). MCP/skills management
-          and Chromium are NOT yet implemented. No full GNOME desktop,
-          no Firefox, no Office, no image/video viewers — by design.
+          the editor (module 8: native GTK code editing, agent-modified
+          files sidebar, native side-by-side diff) PLUS unified
+          skills + MCP management inside the settings app (per Q3, no
+          TUI): one registry file, one shared library, one GUI page
+          for both skills and MCP servers (add / remove / enable /
+          disable, per-item license field with a confirmation prompt
+          when empty). MCP env vars are NOT edited in this GUI (they
+          are often secrets; libsecret storage is a later step) but
+          the registry format already carries env. Full MCP protocol
+          client + tool-call approval live in the agent service (later)
+          and reuse the module 5 ticket broker. Chromium is NOT yet
+          implemented. No full GNOME desktop, no Firefox, no Office,
+          no image/video viewers — by design.
 
           Verify the ISO before writing it to USB:
 
