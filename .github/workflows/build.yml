@@ -167,7 +167,11 @@ jobs:
           sudo lb build 2>&1 | tee -a build.log
           sudo rm -rf chroot chroot.tmp 2>/dev/null || true
           df -h /
-          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name 'live-image-amd64.iso' -o -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          # Diagnostic (run 3 found no ISO with the assumed names): list
+          # what lb build actually produced before locating the image.
+          ls -la
+          find . -maxdepth 3 -type f -name '*.iso' -printf '%p %s bytes\n' || true
+          ISO_SOURCE="$(find . -maxdepth 3 -type f -name '*.iso' | head -n1)"
           test -n "$ISO_SOURCE"
           chmod 755 scripts/repack-dclawos-dualboot-iso.sh
           DCLAWOS_BINARY_TREE="$GITHUB_WORKSPACE/binary" \
@@ -186,7 +190,7 @@ jobs:
         id: iso
         run: |
           set -euxo pipefail
-          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name 'live-image-amd64.iso' -o -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          ISO_SOURCE="$(find . -maxdepth 3 -type f -name '*.iso' | head -n1)"
           test -n "$ISO_SOURCE"
           test -s "$ISO_SOURCE"
           ISO="DclawOS-2.0-amd64-livecd.iso"
