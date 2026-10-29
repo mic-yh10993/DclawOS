@@ -153,7 +153,8 @@ jobs:
             config/includes.chroot/usr/local/bin/dclawos-shell \
             config/includes.chroot/usr/local/bin/dclawos-dashboard \
             config/includes.chroot/usr/local/bin/dclawos-log-event \
-            config/includes.chroot/usr/local/bin/dclawos-settings
+            config/includes.chroot/usr/local/bin/dclawos-settings \
+            config/includes.chroot/usr/local/bin/dclawos-route
           sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
           sudo cp -f /usr/lib/syslinux/modules/bios/*.c32 config/bootloaders/isolinux/
           test -s config/bootloaders/isolinux/isolinux.bin
@@ -215,14 +216,23 @@ jobs:
           Build: ${GITHUB_RUN_NUMBER}
           Commit: ${GITHUB_SHA}
 
-          Phase 2 module 3 of the from-scratch reboot: a bootable Debian
+          Phase 2 module 4 of the from-scratch reboot: a bootable Debian
           Bookworm live image with a minimal desktop session (Openbox +
           the DclawOS shell with Wnck window switching, the AI dashboard
           as the default desktop view, and the self-built settings app
-          writing org.dclawos.settings directly). The agent service,
-          privilege broker and editor are NOT yet implemented; they land
-          module by module in later builds. No full GNOME desktop, no
-          Firefox, no Office, no image/video viewers — by design.
+          writing org.dclawos.settings directly) PLUS the routing engine
+          compiled into the image at build time: the stripped OmniRoute
+          combos config/scoring subset (497 files, MIT, source shipped
+          in the image) bundled with esbuild under Node 24, a local
+          routing decision function (dclawos-route CLI: rank providers,
+          explain the choice, no gateway call), and the provider/model
+          catalog that feeds the settings panel's dropdowns. The agent
+          service, privilege broker and editor are NOT yet implemented;
+          they land module by module in later builds. No full GNOME
+          desktop, no Firefox, no Office, no image/video viewers — by
+          design. The gateway dispatch core is deliberately NOT included
+          (Phase 2 vendors config/scoring only; live cost/latency
+          refinement belongs to the agent service).
 
           Verify the ISO before writing it to USB:
 

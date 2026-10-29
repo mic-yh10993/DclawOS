@@ -23,6 +23,7 @@ Reuse notes (evaluation cards §3, step 0 retrieval):
   pattern only, reason: the pattern IS "GUI writes GSettings directly",
   which is exactly the user requirement; the write target changed.
 """
+import json
 import os
 import sys
 
@@ -33,6 +34,7 @@ from gi.repository import Gtk, Gio  # noqa: E402
 
 SCHEMA_ID = "org.dclawos.settings"
 REGISTRY_DIR = "/var/lib/dclawos"
+CATALOG_PATH = "/usr/share/dclawos/engine/catalog.json"
 
 
 def log(msg):
@@ -95,27 +97,102 @@ class SettingsApp(Gtk.Window):
         box.pack_start(note, False, False, 0)
         return box
 
+    def load_catalog(self):
+        """Read the routing catalog JSON; None when the engine is absent.
+
+        The catalog is generated at image build time by the routing
+        engine hook (module 4) from the vendored provider registry.
+        A missing or unreadable catalog is NOT an error: the panel
+        falls back to free-text entries (module 3 behavior).
+        """
+        try:
+            with open(CATALOG_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            providers = data.get("providers")
+            if not isinstance(providers, list):
+                return None
+            return providers
+        except (OSError, ValueError):
+            return None
+
     def build_ai_panel(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(12)
 
-        provider = Gtk.Entry()
-        provider.set_text(self.settings.get_string("ai-provider"))
-        provider.connect(
-            "changed",
-            lambda entry: self.settings.set_string(
-                "ai-provider", entry.get_text()))
-        box.pack_start(
-            self.labeled_row("AI 供应商", provider), False, False, 0)
+        catalog = self.load_catalog()
+        if catalog:
+            providers_by_id = {}
+            for entry in catalog:
+                if isinstance(entry, dict) and isinstance(
+                        entry.get("id"), str):
+                    providers_by_id[entry["id"]] = entry
+            provider_combo = Gtk.ComboBoxText()
+            for pid in providers_by_id:
+                provider_combo.append(pid, pid)
+            current_provider = self.settings.get_string("ai-provider")
+            if current_provider and current_provider not in providers_by_id:
+                provider_combo.prepend(
+                    current_provider,
+                    current_provider + "（未在目录中）")
+            if current_provider:
+                provider_combo.set_active_id(current_provider)
 
-        model = Gtk.Entry()
-        model.set_text(self.settings.get_string("ai-model"))
-        model.connect(
-            "changed",
-            lambda entry: self.settings.set_string(
-                "ai-model", entry.get_text()))
-        box.pack_start(
-            self.labeled_row("AI 模型", model), False, False, 0)
+            model_combo = Gtk.ComboBoxText()
+
+            def refresh_models(pid):
+                model_combo.remove_all()
+                entry = providers_by_id.get(pid)
+                models = entry.get("models") if isinstance(entry, dict) \
+                    else None
+                ids = [m["id"] for m in (models or [])
+                       if isinstance(m, dict)
+                       and isinstance(m.get("id"), str)]
+                for mid in ids:
+                    model_combo.append(mid, mid)
+                current_model = self.settings.get_string("ai-model")
+                if current_model and current_model not in ids:
+                    model_combo.prepend(
+                        current_model,
+                        current_model + "（未在目录中）")
+                if current_model:
+                    model_combo.set_active_id(current_model)
+
+            def on_provider_changed(combo):
+                pid = combo.get_active_id()
+                if pid:
+                    self.settings.set_string("ai-provider", pid)
+                    refresh_models(pid)
+
+            provider_combo.connect("changed", on_provider_changed)
+            model_combo.connect(
+                "changed",
+                lambda combo: self.settings.set_string(
+                    "ai-model", combo.get_active_id() or ""))
+            refresh_models(current_provider)
+            box.pack_start(
+                self.labeled_row("AI 供应商", provider_combo),
+                False, False, 0)
+            box.pack_start(
+                self.labeled_row("AI 模型", model_combo),
+                False, False, 0)
+        else:
+            provider = Gtk.Entry()
+            provider.set_text(self.settings.get_string("ai-provider"))
+            provider.connect(
+                "changed",
+                lambda entry: self.settings.set_string(
+                    "ai-provider", entry.get_text()))
+            box.pack_start(
+                self.labeled_row("AI 供应商", provider), False, False, 0)
+
+            model = Gtk.Entry()
+            model.set_text(self.settings.get_string("ai-model"))
+            model.connect(
+                "changed",
+                lambda entry: self.settings.set_string(
+                    "ai-model", entry.get_text()))
+            box.pack_start(
+                self.labeled_row("AI 模型", model), False, False, 0)
 
         routing = Gtk.ComboBoxText()
         routing.append("auto", "自动（路由引擎选择）")
@@ -131,8 +208,9 @@ class SettingsApp(Gtk.Window):
             self.labeled_row("路由模式", routing), False, False, 0)
 
         note = Gtk.Label(
-            label="说明：供应商与模型目录由路由引擎（模块 4）提供；"
-                  "此处先存键值，引擎接通后下拉内容随目录更新。")
+            label="说明：供应商与模型下拉来自路由引擎目录 "
+                  "(/usr/share/dclawos/engine/catalog.json，模块 4 编译生成)；"
+                  "目录缺失时回退自由文本输入。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         box.pack_start(note, False, False, 0)

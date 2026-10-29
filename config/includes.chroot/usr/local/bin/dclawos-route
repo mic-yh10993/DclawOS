@@ -1,0 +1,120 @@
+#!/usr/bin/env dclawos-node
+// DclawOS routing CLI (GPL-2.0-or-later; DclawOS-written code).
+//
+// Usage:
+//   dclawos-route [--strategy S] [--provider P] [--model M]
+//   dclawos-route --catalog
+//   dclawos-route --selftest   (build-time behavior gate: exits non-zero
+//                               if the engine bundle is broken)
+// Prints a routing decision (or the catalog) as JSON. Never executes a
+// request and never contacts a gateway: this is offline ranking only.
+"use strict";
+
+const { decideRouting, buildCatalog } = require(
+  "/usr/share/dclawos/engine/decision.js");
+
+function parseArgs(argv) {
+  const args = {
+    strategy: undefined,
+    provider: undefined,
+    model: undefined,
+    catalog: false,
+    selftest: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--strategy") args.strategy = argv[++i];
+    else if (arg === "--provider") args.provider = argv[++i];
+    else if (arg === "--model") args.model = argv[++i];
+    else if (arg === "--catalog") args.catalog = true;
+    else if (arg === "--selftest") args.selftest = true;
+    else if (arg === "-h" || arg === "--help") {
+      console.log(
+        "usage: dclawos-route [--strategy S] [--provider P] [--model M]\n" +
+          "       dclawos-route --catalog | dclawos-route --selftest");
+      process.exit(0);
+    } else {
+      console.error(`dclawos-route: unknown argument: ${arg}`);
+      process.exit(2);
+    }
+  }
+  return args;
+}
+
+function fail(message) {
+  console.error(`dclawos-route --selftest FAILED: ${message}`);
+  process.exit(1);
+}
+
+function selftest() {
+  let decision;
+  try {
+    decision = decideRouting({});
+  } catch (err) {
+    fail(`decideRouting({}) threw: ${err && err.message}`);
+  }
+  if (!decision || typeof decision.provider !== "string" ||
+      decision.provider.length === 0) {
+    fail("empty provider in default decision");
+  }
+  if (!Array.isArray(decision.ranked) || decision.ranked.length === 0) {
+    fail("empty ranking in default decision");
+  }
+  if (typeof decision.routing_explanation !== "string" ||
+      decision.routing_explanation.length === 0) {
+    fail("empty routing_explanation in default decision");
+  }
+  const first = decision.ranked[0].provider;
+  let pinned;
+  try {
+    pinned = decideRouting({ provider: first });
+  } catch (err) {
+    fail(`decideRouting({provider: ${first}}) threw: ${err && err.message}`);
+  }
+  if (pinned.provider !== first) {
+    fail(`provider pin not honored: got ${pinned.provider}, want ${first}`);
+  }
+  let unknownRejected = false;
+  try {
+    decideRouting({ provider: "__dclawos_no_such_provider__" });
+  } catch (err) {
+    unknownRejected = /unknown provider/.test(String(err && err.message));
+  }
+  if (!unknownRejected) {
+    fail("unknown provider was not rejected");
+  }
+  const catalog = buildCatalog();
+  if (!catalog || !Array.isArray(catalog.providers) ||
+      catalog.providers.length === 0) {
+    fail("empty provider catalog");
+  }
+  for (const provider of catalog.providers) {
+    if (!Array.isArray(provider.models)) {
+      fail(`provider ${provider.id} has no models array`);
+    }
+  }
+  console.log(
+    `dclawos-route --selftest OK: ${decision.ranked.length} providers ` +
+      `ranked, ${catalog.providers.length} providers cataloged, ` +
+      `chose ${decision.provider}/${decision.model}`);
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.selftest) {
+    selftest();
+    return;
+  }
+  if (args.catalog) {
+    console.log(JSON.stringify(buildCatalog(), null, 2));
+    return;
+  }
+  const decision = decideRouting({
+    strategy: args.strategy,
+    provider: args.provider,
+    model: args.model,
+  });
+  console.log(JSON.stringify(decision, null, 2));
+}
+
+main();

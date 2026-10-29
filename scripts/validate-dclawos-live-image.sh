@@ -57,8 +57,13 @@ for path in \
     usr/local/bin/dclawos-dashboard \
     usr/local/bin/dclawos-log-event \
     usr/local/bin/dclawos-settings \
+    usr/local/bin/dclawos-route \
     usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml \
     usr/share/glib-2.0/schemas/gschemas.compiled \
+    usr/share/dclawos/engine/decision.js \
+    usr/share/dclawos/engine/catalog.json \
+    usr/share/dclawos/engine-src/README.md \
+    opt/dclawos-node/bin/node \
     var/lib/dclawos \
     etc/lightdm/lightdm.conf.d/70-dclawos-autologin.conf \
     etc/xdg/openbox/autostart \
@@ -121,6 +126,26 @@ grep -q 'dclawos-dashboard' "$WORK/autostart-extract/etc/xdg/openbox/autostart" 
 unsquashfs -d "$WORK/settings-extract" "$FS" usr/local/bin/dclawos-settings >/dev/null 2>&1
 test -x "$WORK/settings-extract/usr/local/bin/dclawos-settings"
 python3 -m py_compile "$WORK/settings-extract/usr/local/bin/dclawos-settings"
+# Phase 2 module 4: routing engine bundle must exist, expose the
+# decision API, and ship a valid catalog (presence + API + JSON gates;
+# the build-time hook already ran the real behavior selftest inside
+# the chroot, which the host-side gate cannot reproduce without X).
+unsquashfs -d "$WORK/engine-extract" "$FS" usr/share/dclawos/engine >/dev/null 2>&1
+test -s "$WORK/engine-extract/usr/share/dclawos/engine/decision.js"
+grep -q 'decideRouting' "$WORK/engine-extract/usr/share/dclawos/engine/decision.js" || {
+    echo "engine bundle lacks decideRouting API" >&2
+    exit 1
+}
+python3 -m json.tool "$WORK/engine-extract/usr/share/dclawos/engine/catalog.json" > /dev/null || {
+    echo "engine catalog.json invalid" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/route-extract" "$FS" usr/local/bin/dclawos-route >/dev/null 2>&1
+test -x "$WORK/route-extract/usr/local/bin/dclawos-route"
+grep -q 'decision.js' "$WORK/route-extract/usr/local/bin/dclawos-route" || {
+    echo "dclawos-route does not reference the engine bundle" >&2
+    exit 1
+}
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 
