@@ -134,6 +134,14 @@ jobs:
 
           sudo bash scripts/prepare-dclawos-live-build-compression.sh
 
+          # Stage chroot hooks for live-build execution. live-build only
+          # executes top-level config/hooks/*.chroot; the repo keeps source
+          # hooks under config/hooks/normal/ for review (same mechanism as
+          # the old DclawOS pipeline's stage step). Without this step the
+          # chmod glob below matches nothing and the step fails (run 1).
+          sudo bash -c 'rm -f config/hooks/*.chroot; for hook in config/hooks/normal/*.hook.chroot; do install -m 0755 "$hook" "config/hooks/$(basename "${hook%.hook.chroot}").chroot"; done'
+          ls -l config/hooks/*.chroot
+
           sudo chmod 755 config/hooks/*.chroot \
             config/includes.chroot/usr/local/bin/dclawos-shell
           sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
