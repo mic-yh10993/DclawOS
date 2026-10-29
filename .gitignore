@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+*.iso
+*.img
+*.log
+.DS_Store
+*.swp
+__pycache__/
