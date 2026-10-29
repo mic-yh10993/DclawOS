@@ -54,9 +54,10 @@ except Exception:
     HAVE_WNCK = False
 
 # Slot label -> (launch command, Wnck window-class hint for pre-existing
-# windows). Dashboard / settings / Chromium binaries land in later modules;
-# until then clicking their slot logs "not installed yet" instead of
-# crashing (honest placeholder, same rule as Phase 1).
+# windows). All four slots are backed by real binaries since module 10
+# (Chromium from the Debian package); a slot whose binary is missing
+# still logs instead of crashing, so a broken package never kills the
+# shell.
 SLOTS = [
     ("AI 看板", "dclawos-dashboard", "dclawos-dashboard"),
     ("设置", "dclawos-settings", "dclawos-settings"),

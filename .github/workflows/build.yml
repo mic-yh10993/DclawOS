@@ -229,26 +229,22 @@ jobs:
           Build: ${GITHUB_RUN_NUMBER}
           Commit: ${GITHUB_SHA}
 
-          Phase 2 module 9 of the from-scratch reboot: a bootable Debian
-          Bookworm live image with a minimal desktop session (Openbox +
-          the DclawOS shell with Wnck window switching, the AI dashboard
-          as the default desktop view, and the self-built settings app
-          writing org.dclawos.settings directly), the routing engine
-          (module 4), the privilege broker (module 5), GUI operation +
-          takeover (module 6) and separation + monitoring (module 7),
-          the editor (module 8: native GTK code editing, agent-modified
-          files sidebar, native side-by-side diff) PLUS unified
-          skills + MCP management inside the settings app (per Q3, no
-          TUI): one registry file, one shared library, one GUI page
-          for both skills and MCP servers (add / remove / enable /
-          disable, per-item license field with a confirmation prompt
-          when empty). MCP env vars are NOT edited in this GUI (they
-          are often secrets; libsecret storage is a later step) but
-          the registry format already carries env. Full MCP protocol
-          client + tool-call approval live in the agent service (later)
-          and reuse the module 5 ticket broker. Chromium is NOT yet
-          implemented. No full GNOME desktop, no Firefox, no Office,
-          no image/video viewers — by design.
+          Phase 2 module 10 (final module) of the from-scratch reboot:
+          a bootable Debian Bookworm live image with a minimal desktop
+          session (Openbox + the DclawOS shell with Wnck window
+          switching, the AI dashboard as the default desktop view, and
+          the self-built settings app writing org.dclawos.settings
+          directly), the routing engine (module 4), the privilege
+          broker (module 5), GUI operation + takeover (module 6),
+          separation + monitoring (module 7), the editor (module 8:
+          native GTK code editing, agent-modified files sidebar,
+          native side-by-side diff), unified skills + MCP management
+          inside the settings app (module 9, per Q3, no TUI) PLUS
+          Chromium from the Debian package, occupying its taskbar slot
+          (per Q5) alongside the AI dashboard, Settings and Terminal.
+          All ten Phase 2 modules are now implemented. No full GNOME
+          desktop, no Firefox, no Office, no image/video viewers —
+          by design.
 
           Verify the ISO before writing it to USB:
 

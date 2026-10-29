@@ -73,6 +73,8 @@ for path in \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
     usr/bin/xdotool \
+    usr/bin/chromium \
+    usr/share/applications/chromium.desktop \
     etc/systemd/system/dclawos-privileged.service \
     etc/systemd/system/multi-user.target.wants/dclawos-privileged.service \
     usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml \
@@ -120,6 +122,11 @@ python3 -m py_compile "$SHELL_EXTRACT"
 # image (a revert to the Phase 1 logging stub would fail here).
 grep -q 'activate_window' "$SHELL_EXTRACT" || {
     echo "taskbar switching wiring missing from final image" >&2
+    exit 1
+}
+# Phase 2 module 10: Chromium must occupy a taskbar slot (Q5).
+grep -q '("Chromium", "chromium", "Chromium")' "$SHELL_EXTRACT" || {
+    echo "taskbar lacks the Chromium slot" >&2
     exit 1
 }
 grep -q 'Wnck' "$SHELL_EXTRACT" || {
