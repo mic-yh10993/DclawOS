@@ -66,6 +66,10 @@ for path in \
     usr/local/bin/dclawos-agent-ctl \
     usr/local/bin/dclawos-monitor \
     usr/local/bin/dclawos-agent-run \
+    usr/local/bin/dclawos-editor \
+    usr/local/lib/dclawos/modifiedfiles.py \
+    usr/share/gir-1.0/GtkSource-4.0.gir \
+    usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.0.typelib \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
     usr/bin/xdotool \
@@ -267,6 +271,28 @@ for home in dclaw dclaw-agent; do
         exit 1
     }
 done
+# Phase 2 module 8: editor + modified-files lib must be valid Python;
+# the editor must use the native GtkSourceView (not a web view, not an
+# embedded terminal) and the dashboard must launch it.
+unsquashfs -d "$WORK/editor-extract" "$FS" usr/local/bin/dclawos-editor >/dev/null 2>&1
+test -x "$WORK/editor-extract/usr/local/bin/dclawos-editor"
+python3 -m py_compile "$WORK/editor-extract/usr/local/bin/dclawos-editor"
+grep -q 'GtkSource' "$WORK/editor-extract/usr/local/bin/dclawos-editor" || {
+    echo "editor does not use GtkSourceView" >&2
+    exit 1
+}
+# No embedded terminal / web view: match import patterns, not prose
+# mentions (the editor docstring discusses the ban in words).
+if grep -qE 'require_version\("?(Vte|WebKit)|from gi.repository import.*(Vte|WebKit)|import (Vte|WebKit)' "$WORK/editor-extract/usr/local/bin/dclawos-editor"; then
+    echo "editor embeds a terminal or web view (forbidden)" >&2
+    exit 1
+fi
+unsquashfs -d "$WORK/modifiedfiles-extract" "$FS" usr/local/lib/dclawos/modifiedfiles.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/modifiedfiles-extract/usr/local/lib/dclawos/modifiedfiles.py"
+grep -q 'dclawos-editor' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard lacks the editor button" >&2
+    exit 1
+}
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 

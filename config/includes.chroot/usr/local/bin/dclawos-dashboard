@@ -117,6 +117,11 @@ class Dashboard(Gtk.Window):
         monitor_btn.connect("clicked", self.open_monitor)
         box.pack_start(monitor_btn, False, False, 0)
 
+        # Module 8 editor button: fast native code editing.
+        editor_btn = Gtk.Button(label="编辑器")
+        editor_btn.connect("clicked", self.open_editor)
+        box.pack_start(editor_btn, False, False, 0)
+
         self.store = Gtk.ListStore(str, str, str, str)
         tree = Gtk.TreeView(model=self.store)
         for index, title in enumerate(("时间", "类型", "摘要", "会话")):
@@ -148,6 +153,12 @@ class Dashboard(Gtk.Window):
             subprocess.Popen(["dclawos-monitor"])
         except OSError as exc:
             log(f"monitor launch failed: {exc}")
+
+    def open_editor(self, _button):
+        try:
+            subprocess.Popen(["dclawos-editor"])
+        except OSError as exc:
+            log(f"editor launch failed: {exc}")
 
     def poll_takeover(self):
         if takeoverlib is None:

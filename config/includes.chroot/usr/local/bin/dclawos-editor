@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""DclawOS editor (Phase 2 module 8): native fast code editor.
+
+Edits code fast and shows files the agent modified (sidebar, fed by
+the modified-files contract in modifiedfiles.py — the future agent
+service writes that file when it modifies something).
+
+DELIBERATE DEVIATION from evaluation cards §8 (documented, not hidden):
+the card says "Monaco core, direct reuse (component)". Monaco
+(vscode editor.main.ts, browser/widget/diffEditor) is a BROWSER
+component: it needs a DOM to run. Hosting it here would mean a
+browser engine
+— a web view — which the user's binding constraints forbid ("no
+Electron, no web views") and which would break the lightweight native
+GTK3 direction. So the editor is built on GtkSourceView (GNOME's
+native code-editing widget: syntax highlighting, line numbers,
+search) instead. What transfers from VSCode is the STRUCTURE (card
+§8 row 109 already says "structure reference only"): a files view for
+agent-modified files, a diff view for comparing files — implemented
+natively (two GtkSourceViews + stdlib difflib, no browser) — and the
+terminal row is NOT embedded: per user-confirmed Q7 the editor opens
+the SYSTEM terminal app (xterm) at the file's directory instead.
+No embedded terminal widget and no browser engine anywhere in this
+file (the image validator greps for their imports and fails the
+build if they appear).
+"""
+
+import difflib
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkSource", "4.0")
+from gi.repository import Gtk, GLib, GtkSource  # noqa: E402
+
+try:
+    import modifiedfiles
+except ImportError:
+    modifiedfiles = None
+
+SIDEBAR_POLL_MS = 2000
+
+
+def log(msg):
+    print(f"dclawos-editor: {msg}", flush=True)
+
+
+def load_text(path):
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def make_source_view():
+    buffer = GtkSource.Buffer()
+    view = GtkSource.View.new_with_buffer(buffer)
+    view.set_show_line_numbers(True)
+    view.set_highlight_current_line(True)
+    view.set_auto_indent(True)
+    view.set_tab_width(4)
+    view.set_insert_spaces_instead_of_tabs(True)
+    scheme_manager = GtkSource.StyleSchemeManager.get_default()
+    scheme = None
+    for name in ("classic", "tango"):
+        scheme = scheme_manager.get_scheme(name)
+        if scheme is not None:
+            break
+    if scheme is not None:
+        buffer.set_style_scheme(scheme)
+    return view, buffer
+
+
+def set_language(buffer, path):
+    try:
+        manager = GtkSource.LanguageManager.get_default()
+        language = manager.guess_language(path, None)
+    except Exception:
+        language = None
+    if language is not None:
+        buffer.set_language(language)
+
+
+def highlight_lines(buffer, start_line, end_line):
+    """Highlight whole lines [start_line, end_line) with a changed tag."""
+    if end_line <= start_line:
+        return
+    tag_table = buffer.get_tag_table()
+    tag = tag_table.lookup("dclawos-changed")
+    if tag is None:
+        tag = buffer.create_tag("dclawos-changed", background="#ffe0b2")
+    line_count = buffer.get_line_count()
+    start = buffer.get_iter_at_line(min(start_line, line_count - 1))
+    if end_line >= line_count:
+        end = buffer.get_end_iter()
+    else:
+        end = buffer.get_iter_at_line(end_line)
+    buffer.apply_tag(tag, start, end)
+
+
+class CompareWindow(Gtk.Window):
+    """Read-only side-by-side diff of two files (native, difflib)."""
+
+    def __init__(self, left_path, right_path):
+        super().__init__(title="dclawos-editor — 对比")
+        self.set_default_size(1000, 650)
+        try:
+            left_text = load_text(left_path)
+            right_text = load_text(right_path)
+        except OSError as exc:
+            label = Gtk.Label(label=f"对比读取失败：{exc}")
+            self.add(label)
+            self.show_all()
+            return
+        left_lines = left_text.splitlines()
+        right_lines = right_text.splitlines()
+        opcodes = difflib.SequenceMatcher(
+            None, left_lines, right_lines).get_opcodes()
+        changed = sum(1 for op in opcodes if op[0] != "equal")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+        header = Gtk.Label(
+            label=f"左：{left_path}\n右：{right_path}\n{changed} 处不同")
+        header.set_halign(Gtk.Align.START)
+        box.pack_start(header, False, False, 0)
+
+        left_view, left_buffer = make_source_view()
+        right_view, right_buffer = make_source_view()
+        left_view.set_editable(False)
+        right_view.set_editable(False)
+        left_buffer.set_text(left_text, -1)
+        right_buffer.set_text(right_text, -1)
+        set_language(left_buffer, left_path)
+        set_language(right_buffer, right_path)
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == "equal":
+                continue
+            highlight_lines(left_buffer, i1, i2)
+            highlight_lines(right_buffer, j1, j2)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        left_scrolled = Gtk.ScrolledWindow()
+        left_scrolled.add(left_view)
+        paned.pack1(left_scrolled, True, False)
+        right_scrolled = Gtk.ScrolledWindow()
+        right_scrolled.add(right_view)
+        paned.pack2(right_scrolled, True, False)
+        box.pack_start(paned, True, True, 0)
+        self.show_all()
+
+
+class CompareDialog(Gtk.Dialog):
+    def __init__(self, parent):
+        super().__init__(title="对比两个文件", transient_for=parent,
+                         flags=Gtk.DialogFlags.MODAL)
+        self.add_button("取消", Gtk.ResponseType.CANCEL)
+        self.add_button("对比", Gtk.ResponseType.OK)
+        area = self.get_content_area()
+        area.set_border_width(8)
+        self.entries = []
+        for label_text in ("左文件：", "右文件："):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.pack_start(Gtk.Label(label=label_text), False, False, 0)
+            entry = Gtk.Entry()
+            row.pack_start(entry, True, True, 0)
+            browse = Gtk.Button(label="浏览…")
+            browse.connect("clicked", self.on_browse, entry)
+            row.pack_start(browse, False, False, 0)
+            area.pack_start(row, False, False, 0)
+            self.entries.append(entry)
+        self.show_all()
+
+    def on_browse(self, _button, entry):
+        dialog = Gtk.FileChooserDialog(
+            title="选择文件", transient_for=self,
+            action=Gtk.FileChooserAction.OPEN)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("选择", Gtk.ResponseType.OK)
+        if dialog.run() == Gtk.ResponseType.OK:
+            entry.set_text(dialog.get_filename() or "")
+        dialog.destroy()
+
+
+class EditorApp(Gtk.Window):
+    def __init__(self, initial_path):
+        super().__init__(title="dclawos-editor")
+        self.set_default_size(1000, 700)
+        self.current_path = None
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_open = Gtk.Button(label="打开")
+        btn_open.connect("clicked", self.on_open)
+        btn_save = Gtk.Button(label="保存")
+        btn_save.connect("clicked", self.on_save)
+        btn_compare = Gtk.Button(label="对比…")
+        btn_compare.connect("clicked", self.on_compare)
+        btn_terminal = Gtk.Button(label="在终端打开所在目录")
+        btn_terminal.connect("clicked", self.on_terminal)
+        for btn in (btn_open, btn_save, btn_compare, btn_terminal):
+            toolbar.pack_start(btn, False, False, 0)
+        box.pack_start(toolbar, False, False, 0)
+
+        find_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        find_row.pack_start(Gtk.Label(label="查找："), False, False, 0)
+        self.find_entry = Gtk.Entry()
+        self.find_entry.connect("activate", self.on_find_next)
+        find_row.pack_start(self.find_entry, True, True, 0)
+        btn_next = Gtk.Button(label="下一个")
+        btn_next.connect("clicked", self.on_find_next)
+        btn_prev = Gtk.Button(label="上一个")
+        btn_prev.connect("clicked", self.on_find_prev)
+        find_row.pack_start(btn_next, False, False, 0)
+        find_row.pack_start(btn_prev, False, False, 0)
+        box.pack_start(find_row, False, False, 0)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.sidebar_store = Gtk.ListStore(str, str)
+        sidebar_tree = Gtk.TreeView(model=self.sidebar_store)
+        column = Gtk.TreeViewColumn(
+            "agent 修改的文件", Gtk.CellRendererText(), text=0)
+        column.set_expand(True)
+        sidebar_tree.append_column(column)
+        time_column = Gtk.TreeViewColumn(
+            "时间", Gtk.CellRendererText(), text=1)
+        sidebar_tree.append_column(time_column)
+        sidebar_tree.connect("row-activated", self.on_sidebar_open)
+        sidebar_scrolled = Gtk.ScrolledWindow()
+        sidebar_scrolled.add(sidebar_tree)
+        paned.pack1(sidebar_scrolled, False, False)
+
+        self.view, self.buffer = make_source_view()
+        self.buffer.connect("modified-changed", self.on_modified_changed)
+        editor_scrolled = Gtk.ScrolledWindow()
+        editor_scrolled.add(self.view)
+        paned.pack2(editor_scrolled, True, False)
+        box.pack_start(paned, True, True, 0)
+
+        self.status = Gtk.Label(label="")
+        self.status.set_halign(Gtk.Align.START)
+        box.pack_start(self.status, False, False, 0)
+
+        self.connect("delete-event", self.on_close)
+        self.refresh_sidebar()
+        GLib.timeout_add(SIDEBAR_POLL_MS, self.refresh_sidebar)
+        if initial_path:
+            if os.path.isfile(initial_path):
+                self.open_file(initial_path)
+            else:
+                self.status.set_text(f"文件不存在：{initial_path}")
+        self.update_title()
+
+    def update_title(self):
+        name = os.path.basename(self.current_path) \
+            if self.current_path else "未命名"
+        dirty = " ●" if self.buffer.get_modified() else ""
+        self.set_title(f"dclawos-editor — {name}{dirty}")
+
+    def on_modified_changed(self, _buffer):
+        self.update_title()
+
+    def set_status(self, text):
+        self.status.set_text(text)
+        log(text)
+
+    def confirm_discard(self):
+        if not self.buffer.get_modified():
+            return True
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="当前文件尚未保存，是否先保存？")
+        dialog.add_button("保存", Gtk.ResponseType.YES)
+        dialog.add_button("放弃", Gtk.ResponseType.NO)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.YES:
+            return self.save_file()
+        if response == Gtk.ResponseType.NO:
+            return True
+        return False
+
+    def on_close(self, _window, _event):
+        return not self.confirm_discard()
+
+    def open_file(self, path):
+        if not self.confirm_discard():
+            return
+        try:
+            text = load_text(path)
+        except OSError as exc:
+            self.set_status(f"打开失败：{exc}")
+            return
+        self.buffer.set_text(text, -1)
+        set_language(self.buffer, path)
+        self.buffer.set_modified(False)
+        self.current_path = path
+        self.update_title()
+        self.set_status(f"已打开：{path}")
+
+    def save_file(self):
+        if self.current_path is None:
+            dialog = Gtk.FileChooserDialog(
+                title="保存文件", transient_for=self,
+                action=Gtk.FileChooserAction.SAVE)
+            dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+            dialog.add_button("保存", Gtk.ResponseType.OK)
+            if dialog.run() != Gtk.ResponseType.OK:
+                dialog.destroy()
+                return False
+            self.current_path = dialog.get_filename()
+            dialog.destroy()
+        try:
+            start, end = self.buffer.get_bounds()
+            with open(self.current_path, "w", encoding="utf-8") as handle:
+                handle.write(self.buffer.get_text(start, end, True))
+        except OSError as exc:
+            self.set_status(f"保存失败：{exc}")
+            return False
+        self.buffer.set_modified(False)
+        set_language(self.buffer, self.current_path)
+        self.update_title()
+        self.set_status(f"已保存：{self.current_path}")
+        return True
+
+    def on_open(self, _button):
+        dialog = Gtk.FileChooserDialog(
+            title="打开文件", transient_for=self,
+            action=Gtk.FileChooserAction.OPEN)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("打开", Gtk.ResponseType.OK)
+        if dialog.run() == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+            dialog.destroy()
+            if filename:
+                self.open_file(filename)
+        else:
+            dialog.destroy()
+
+    def on_save(self, _button):
+        self.save_file()
+
+    def on_terminal(self, _button):
+        if self.current_path:
+            cwd = os.path.dirname(os.path.abspath(self.current_path))
+        else:
+            cwd = os.path.expanduser("~")
+        if not os.path.isdir(cwd):
+            cwd = os.path.expanduser("~")
+        try:
+            subprocess.Popen(["xterm"], cwd=cwd)
+        except OSError as exc:
+            self.set_status(f"终端启动失败：{exc}")
+
+    def on_compare(self, _button):
+        dialog = CompareDialog(self)
+        if dialog.run() == Gtk.ResponseType.OK:
+            left = dialog.entries[0].get_text().strip()
+            right = dialog.entries[1].get_text().strip()
+            dialog.destroy()
+            if not left or not right:
+                self.set_status("对比需要两个文件路径")
+                return
+            if not os.path.isfile(left) or not os.path.isfile(right):
+                self.set_status("对比文件不存在，请检查路径")
+                return
+            CompareWindow(left, right)
+        else:
+            dialog.destroy()
+
+    def find(self, forward):
+        text = self.find_entry.get_text()
+        if not text:
+            return
+        settings = GtkSource.SearchSettings()
+        settings.set_search_text(text)
+        try:
+            context = GtkSource.SearchContext.new(self.buffer, settings)
+            context.set_highlight(True)
+            cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+            if forward:
+                found, start, end = context.forward(cursor)
+                if not found:
+                    found, start, end = context.forward(
+                        self.buffer.get_start_iter())
+            else:
+                found, start, end = context.backward(cursor)
+                if not found:
+                    found, start, end = context.backward(
+                        self.buffer.get_end_iter())
+        except Exception as exc:
+            self.set_status(f"查找失败：{exc}")
+            return
+        if found:
+            self.buffer.select_range(start, end)
+            self.view.scroll_to_iter(start, 0.0, False, 0.0, 0.0)
+        else:
+            self.set_status("未找到")
+
+    def on_find_next(self, _widget):
+        self.find(forward=True)
+
+    def on_find_prev(self, _widget):
+        self.find(forward=False)
+
+    def on_sidebar_open(self, _tree, path, _column):
+        tree_iter = self.sidebar_store.get_iter(path)
+        if tree_iter is None:
+            return
+        file_path = self.sidebar_store[tree_iter][0]
+        if not file_path:
+            return
+        if not os.path.isfile(file_path):
+            self.set_status(f"文件已不存在：{file_path}")
+            return
+        self.open_file(file_path)
+
+    def refresh_sidebar(self):
+        entries = modifiedfiles.load_modified_files() \
+            if modifiedfiles is not None else []
+        self.sidebar_store.clear()
+        if not entries:
+            self.sidebar_store.append(
+                ("暂无 agent 修改记录（agent 服务接入后列出）", ""))
+            return True
+        for entry in entries:
+            when = time.strftime(
+                "%m-%d %H:%M", time.localtime(int(entry.get("ts", 0))))
+            self.sidebar_store.append((entry["path"], when))
+        return True
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-editor [file]")
+        return 0
+    initial = sys.argv[1] if len(sys.argv) > 1 else None
+    app = EditorApp(initial)
+    app.connect("destroy", Gtk.main_quit)
+    app.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
