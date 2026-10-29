@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""DclawOS human-takeover popup (Phase 2 module 6).
+
+Shows takeover requests (see takeoverlib.py) and lets the human resolve
+them. The human completes the step (captcha, login, verification) in
+their OWN session — this popup only records the OUTCOME. It has no
+password field: the session-handle entry is a plain visible text field
+labeled "do not enter passwords or tokens", and the backfill never
+contains credentials (takeoverlib.write_result drops credential-like
+extra keys). The popup logs request id + outcome only — never the
+session handle.
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+try:
+    import takeoverlib
+except ImportError as exc:
+    print(f"dclawos-takeover: takeover store unavailable: {exc}",
+          file=sys.stderr)
+    sys.exit(1)
+
+POLL_MS = 1000
+KIND_LABELS = {
+    "captcha": "人机验证",
+    "login": "登录账号",
+    "verification": "验证",
+    "other": "其他",
+}
+
+
+def log(msg):
+    print(f"dclawos-takeover: {msg}", flush=True)
+
+
+class TakeoverApp(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-takeover")
+        self.set_default_size(700, 500)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        header = Gtk.Label(
+            label="AI 接管请求 — AI 需要你帮忙完成一步操作")
+        header.set_halign(Gtk.Align.START)
+        box.pack_start(header, False, False, 0)
+
+        note = Gtk.Label(
+            label="说明：请先在你自己的会话里完成验证/登录，再回来点"
+                  "按钮。这里只记录成功/失败与会话标识，绝不要在这里"
+                  "输入密码、验证码或令牌。")
+        note.set_line_wrap(True)
+        note.set_halign(Gtk.Align.START)
+        box.pack_start(note, False, False, 0)
+
+        self.store = Gtk.ListStore(str, str, str, str, str)
+        tree = Gtk.TreeView(model=self.store)
+        for index, title in enumerate(("种类", "请求内容", "状态", "时间")):
+            column = Gtk.TreeViewColumn(
+                title, Gtk.CellRendererText(), text=index)
+            column.set_resizable(True)
+            if index == 1:
+                column.set_expand(True)
+            tree.append_column(column)
+        tree.get_selection().connect("changed", self.on_select)
+        self.tree = tree
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.add(tree)
+        box.pack_start(scrolled, True, True, 0)
+
+        self.detail = Gtk.Label(label="请选择一条待处理请求")
+        self.detail.set_line_wrap(True)
+        self.detail.set_halign(Gtk.Align.START)
+        box.pack_start(self.detail, False, False, 0)
+
+        self.handle_entry = Gtk.Entry()
+        self.handle_entry.set_placeholder_text(
+            "会话标识（可选，如已登录账号名；不要填密码/令牌）")
+        box.pack_start(self.handle_entry, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.btn_done = Gtk.Button(label="我已完成（成功）")
+        self.btn_done.connect("clicked", self.on_resolve, "success")
+        self.btn_fail = Gtk.Button(label="失败")
+        self.btn_fail.connect("clicked", self.on_resolve, "fail")
+        self.btn_cancel = Gtk.Button(label="取消请求")
+        self.btn_cancel.connect("clicked", self.on_resolve, "cancelled")
+        for btn in (self.btn_done, self.btn_fail, self.btn_cancel):
+            buttons.pack_start(btn, False, False, 0)
+        box.pack_start(buttons, False, False, 0)
+
+        self.selected_id = None
+        self.set_actions_sensitive(False)
+        self.refresh()
+        GLib.timeout_add(POLL_MS, self.refresh)
+
+    def set_actions_sensitive(self, sensitive):
+        for btn in (self.btn_done, self.btn_fail, self.btn_cancel):
+            btn.set_sensitive(sensitive)
+
+    def on_select(self, selection):
+        model, tree_iter = selection.get_selected()
+        if tree_iter is None:
+            self.selected_id = None
+            self.set_actions_sensitive(False)
+            self.detail.set_text("请选择一条待处理请求")
+            return
+        # The request id travels in the store's hidden 5th column, so
+        # the selection stays correct across refreshes.
+        self.selected_id = model[tree_iter][4]
+        request = None
+        for candidate in takeoverlib.list_requests():
+            if candidate["id"] == self.selected_id:
+                request = candidate
+                break
+        if request is None:
+            self.selected_id = None
+            self.set_actions_sensitive(False)
+            return
+        pending = request.get("status") == "pending"
+        self.set_actions_sensitive(pending)
+        when = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(int(request.get("created_at", 0))))
+        self.detail.set_text(
+            f"种类：{KIND_LABELS.get(request.get('kind'), request.get('kind'))}\n"
+            f"内容：{request.get('message')}\n"
+            f"应用提示：{request.get('app_hint') or '无'}\n"
+            f"创建时间：{when}\n"
+            f"状态：{request.get('status')}")
+
+    def on_resolve(self, _button, outcome):
+        if not self.selected_id:
+            return
+        handle = self.handle_entry.get_text().strip() or None
+        try:
+            takeoverlib.write_result(self.selected_id, outcome, handle)
+        except (ValueError, OSError) as exc:
+            self.detail.set_text(f"回填失败：{exc}")
+            return
+        log(f"resolved id={self.selected_id} outcome={outcome}")
+        self.handle_entry.set_text("")
+        self.selected_id = None
+        self.set_actions_sensitive(False)
+        self.refresh()
+
+    def refresh(self):
+        requests = takeoverlib.list_requests()
+        # Newest first; pending rows first within the same view.
+        requests.sort(key=lambda r: (
+            r.get("status") != "pending", -(r.get("created_at", 0))))
+        self.store.clear()
+        for request in requests:
+            when = time.strftime(
+                "%H:%M:%S",
+                time.localtime(int(request.get("created_at", 0))))
+            self.store.append((
+                KIND_LABELS.get(request.get("kind"), request.get("kind")),
+                str(request.get("message", "")),
+                str(request.get("status", "")),
+                when,
+                str(request.get("id", ""))))
+        return True
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-takeover (human popup for AI takeover "
+              "requests)")
+        return 0
+    app = TakeoverApp()
+    app.connect("destroy", Gtk.main_quit)
+    app.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

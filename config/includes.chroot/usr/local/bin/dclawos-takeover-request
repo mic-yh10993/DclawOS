@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""DclawOS takeover request CLI (Phase 2 module 6): agent-side API.
+
+Create a takeover request and optionally wait for the human's backfill:
+  dclawos-takeover-request --kind login \
+      --message '请在浏览器里登录账号' --app-hint 'Chromium' --wait 300
+  dclawos-takeover-request --status <id>
+
+Exit codes: 0 = resolved (or created, without --wait); 1 = request not
+found / bad args; 3 = --wait timed out (the pending request JSON is
+still printed to stdout so the caller keeps the id).
+The backfill contains ONLY outcome + session handle — never
+credentials (see takeoverlib.py).
+"""
+
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+import takeoverlib  # noqa: E402
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="dclawos-takeover-request")
+    parser.add_argument("--kind", default="other",
+                        help="captcha | login | verification | other")
+    parser.add_argument("--message", default="",
+                        help="what the human should do")
+    parser.add_argument("--app-hint", default="",
+                        help="which app/window the step is in")
+    parser.add_argument("--wait", type=int, default=0,
+                        help="seconds to block for the human backfill")
+    parser.add_argument("--status", default="",
+                        help="print one request instead of creating")
+    args = parser.parse_args()
+
+    os.makedirs(takeoverlib.takeover_dir(), exist_ok=True)
+    if args.status:
+        try:
+            request = takeoverlib.load_request(args.status)
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            print(f"dclawos-takeover-request: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(request, indent=2, sort_keys=True,
+                         ensure_ascii=False))
+        return 0
+
+    if not args.message:
+        print("dclawos-takeover-request: --message is required",
+              file=sys.stderr)
+        return 1
+    request = takeoverlib.new_request(args.kind, args.message,
+                                      args.app_hint)
+    takeoverlib.save_request(request)
+    if args.wait <= 0:
+        print(json.dumps(request, indent=2, sort_keys=True,
+                         ensure_ascii=False))
+        return 0
+    resolved = takeoverlib.wait_for_result(request["id"], args.wait)
+    if resolved is None:
+        # Timeout: print the still-pending request so the caller keeps
+        # the id, and signal the timeout via the exit code.
+        try:
+            pending = takeoverlib.load_request(request["id"])
+        except (ValueError, OSError, json.JSONDecodeError):
+            pending = request
+        print(json.dumps(pending, indent=2, sort_keys=True,
+                         ensure_ascii=False))
+        return 3
+    print(json.dumps(resolved, indent=2, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

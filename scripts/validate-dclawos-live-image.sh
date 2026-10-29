@@ -60,7 +60,12 @@ for path in \
     usr/local/bin/dclawos-route \
     usr/local/bin/dclawos-privileged \
     usr/local/bin/dclawos-ticket \
+    usr/local/bin/dclawos-takeover \
+    usr/local/bin/dclawos-takeover-request \
+    usr/local/bin/dclawos-gui \
     usr/local/lib/dclawos/ticketlib.py \
+    usr/local/lib/dclawos/takeoverlib.py \
+    usr/bin/xdotool \
     etc/systemd/system/dclawos-privileged.service \
     etc/systemd/system/multi-user.target.wants/dclawos-privileged.service \
     usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml \
@@ -168,6 +173,27 @@ grep -q 'ExecStart=/usr/local/bin/dclawos-privileged' "$WORK/privunit-extract/et
 }
 grep -q 'WantedBy=multi-user.target' "$WORK/privunit-extract/etc/systemd/system/dclawos-privileged.service" || {
     echo "privilege broker unit missing WantedBy=multi-user.target" >&2
+    exit 1
+}
+# Phase 2 module 6: takeover popup + request CLI + GUI op CLI + shared
+# takeover lib must be executable and valid Python; the lib must carry
+# the credential-key filter (the Q2 backfill guarantee).
+for tool in dclawos-takeover dclawos-takeover-request dclawos-gui; do
+    unsquashfs -d "$WORK/${tool}-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
+    test -x "$WORK/${tool}-extract/usr/local/bin/${tool}"
+    python3 -m py_compile "$WORK/${tool}-extract/usr/local/bin/${tool}"
+done
+unsquashfs -d "$WORK/takeoverlib-extract" "$FS" usr/local/lib/dclawos/takeoverlib.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/takeoverlib-extract/usr/local/lib/dclawos/takeoverlib.py"
+grep -q 'FORBIDDEN_RESULT_KEYS' "$WORK/takeoverlib-extract/usr/local/lib/dclawos/takeoverlib.py" || {
+    echo "takeover lib lacks the credential-key filter" >&2
+    exit 1
+}
+# Dashboard must carry the takeover banner (module 6 launch path).
+unsquashfs -d "$WORK/dash-takeover-extract" "$FS" usr/local/bin/dclawos-dashboard >/dev/null 2>&1
+python3 -m py_compile "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard"
+grep -q 'takeover_banner' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard lacks the takeover banner" >&2
     exit 1
 }
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1

@@ -29,6 +29,7 @@ Reuse notes (evaluation cards §2, step 0 retrieval):
 """
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -36,6 +37,14 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib  # noqa: E402
+
+# Takeover banner (module 6): best effort — if the takeover store is
+# absent the dashboard still works, it just never shows the banner.
+try:
+    sys.path.insert(0, "/usr/local/lib/dclawos")
+    import takeoverlib
+except ImportError:
+    takeoverlib = None
 
 EVENTS_PATH = "/var/lib/dclawos/events.jsonl"
 POLL_MS = 500
@@ -78,6 +87,14 @@ class Dashboard(Gtk.Window):
         header.set_halign(Gtk.Align.START)
         box.pack_start(header, False, False, 0)
 
+        # Module 6 takeover banner: hidden unless a takeover request is
+        # pending. The human sees it on the default desktop view and
+        # clicks through to the takeover popup.
+        self.takeover_banner = Gtk.Button(label="")
+        self.takeover_banner.set_no_show_all(True)
+        self.takeover_banner.connect("clicked", self.open_takeover)
+        box.pack_start(self.takeover_banner, False, False, 0)
+
         self.store = Gtk.ListStore(str, str, str, str)
         tree = Gtk.TreeView(model=self.store)
         for index, title in enumerate(("时间", "类型", "摘要", "会话")):
@@ -96,6 +113,29 @@ class Dashboard(Gtk.Window):
         self.placeholder = None
         self.show_placeholder()
         GLib.timeout_add(POLL_MS, self.poll_events)
+        GLib.timeout_add(POLL_MS, self.poll_takeover)
+
+    def open_takeover(self, _button):
+        try:
+            subprocess.Popen(["dclawos-takeover"])
+        except OSError as exc:
+            log(f"takeover popup launch failed: {exc}")
+
+    def poll_takeover(self):
+        if takeoverlib is None:
+            return True
+        try:
+            pending = takeoverlib.count_pending()
+        except Exception as exc:
+            log(f"takeover count failed: {exc}")
+            return True
+        if pending > 0:
+            self.takeover_banner.set_label(
+                f"⚠ AI 需要你帮忙：{pending} 个接管请求待处理（点击处理）")
+            self.takeover_banner.show()
+        else:
+            self.takeover_banner.hide()
+        return True
 
     def show_placeholder(self):
         if self.placeholder is None:

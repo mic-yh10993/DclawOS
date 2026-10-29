@@ -157,7 +157,11 @@ jobs:
             config/includes.chroot/usr/local/bin/dclawos-route \
             config/includes.chroot/usr/local/bin/dclawos-privileged \
             config/includes.chroot/usr/local/bin/dclawos-ticket \
-            config/includes.chroot/usr/local/lib/dclawos/ticketlib.py
+            config/includes.chroot/usr/local/bin/dclawos-takeover \
+            config/includes.chroot/usr/local/bin/dclawos-takeover-request \
+            config/includes.chroot/usr/local/bin/dclawos-gui \
+            config/includes.chroot/usr/local/lib/dclawos/ticketlib.py \
+            config/includes.chroot/usr/local/lib/dclawos/takeoverlib.py
           sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
           sudo cp -f /usr/lib/syslinux/modules/bios/*.c32 config/bootloaders/isolinux/
           test -s config/bootloaders/isolinux/isolinux.bin
@@ -219,23 +223,23 @@ jobs:
           Build: ${GITHUB_RUN_NUMBER}
           Commit: ${GITHUB_SHA}
 
-          Phase 2 module 5 of the from-scratch reboot: a bootable Debian
+          Phase 2 module 6 of the from-scratch reboot: a bootable Debian
           Bookworm live image with a minimal desktop session (Openbox +
           the DclawOS shell with Wnck window switching, the AI dashboard
           as the default desktop view, and the self-built settings app
           writing org.dclawos.settings directly), the routing engine
-          compiled into the image (module 4), PLUS the privilege broker
-          layer: dclawos-privileged (root systemd service, Unix socket
-          gated to the dclaw group) executes ONLY ticketed operations —
-          no approved, unexpired, params-matching ticket means refusal.
-          Module 5 whitelist is deliberately small (read-file under
-          DclawOS paths, service-status and restart-service for
-          dclawos-* units only); package install and system config
-          writes arrive with the GUI approval flow in later modules.
-          The agent service and editor are NOT yet implemented. No full
-          GNOME desktop, no Firefox, no Office, no image/video viewers
-          — by design. The QEMU smoke gate now also requires the broker
-          startup marker on the serial console.
+          compiled into the image (module 4) and the privilege broker
+          (module 5), PLUS GUI operation + human takeover: dclawos-gui
+          (list/focus windows via Wnck, send keys/clicks/text via
+          xdotool — session-user actions visible on screen, NOT
+          privileged ops) and the takeover flow (agent writes a request,
+          the dashboard shows a banner, the human completes the step in
+          their own session and marks it in the popup; the backfill
+          carries ONLY outcome + session handle, never credentials —
+          the popup has no password field and the store drops
+          credential-like keys). The editor and MCP/skills management
+          are NOT yet implemented. No full GNOME desktop, no Firefox,
+          no Office, no image/video viewers — by design.
 
           Verify the ISO before writing it to USB:
 
