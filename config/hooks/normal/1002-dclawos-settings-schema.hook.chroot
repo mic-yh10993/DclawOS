@@ -1,0 +1,21 @@
+#!/bin/sh
+# Compile the DclawOS GSettings schema (Phase 2 module 3). Hard-fails:
+# if the schema is missing or does not compile, the settings app and the
+# taskbar's window-mode lookup are broken at runtime, so the image must
+# not go green silently.
+set -eu
+
+SCHEMA=/usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml
+[ -f "$SCHEMA" ] || {
+    echo "dclawos-settings-schema: missing schema file: $SCHEMA" >&2
+    exit 1
+}
+command -v glib-compile-schemas >/dev/null 2>&1 || {
+    echo "dclawos-settings-schema: glib-compile-schemas not installed (needs libglib2.0-bin)" >&2
+    exit 1
+}
+glib-compile-schemas /usr/share/glib-2.0/schemas
+[ -f /usr/share/glib-2.0/schemas/gschemas.compiled ] || {
+    echo "dclawos-settings-schema: compiled cache missing after compile" >&2
+    exit 1
+}

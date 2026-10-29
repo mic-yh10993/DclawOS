@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DclawOS own GSettings schema (Phase 2 module 3).
+     Self-written: no reference repo has a DclawOS schema (cards §3).
+     Compiled at image build time by hook 1002 (glib-compile-schemas).
+     window-mode: 'fullscreen' (apps fill the screen except the taskbar,
+       the user-confirmed default) or 'windowed' (plain activation).
+     taskbar-autohide: reserved key (notes §3); the taskbar does not honor
+       it yet, so the settings UI does not expose it until then. -->
+<schemalist>
+  <schema id="org.dclawos.settings" path="/org/dclawos/settings/">
+    <key name="window-mode" type="s">
+      <choices>
+        <choice value="fullscreen"/>
+        <choice value="windowed"/>
+      </choices>
+      <default>'fullscreen'</default>
+      <summary>Application window mode</summary>
+      <description>Fullscreen mode maximizes apps on taskbar activation
+      (taskbar stays visible via its strut); windowed mode activates
+      without maximizing.</description>
+    </key>
+    <key name="taskbar-autohide" type="b">
+      <default>false</default>
+      <summary>Taskbar autohide (reserved)</summary>
+      <description>Reserved for a future taskbar autohide behavior; the
+      taskbar does not read this key yet.</description>
+    </key>
+    <key name="ai-provider" type="s">
+      <default>''</default>
+      <summary>AI provider id</summary>
+      <description>Selected AI provider for the agent service; the
+      routing engine (module 4) resolves the provider catalog.</description>
+    </key>
+    <key name="ai-model" type="s">
+      <default>''</default>
+      <summary>AI model id</summary>
+      <description>Selected AI model within ai-provider; empty means the
+      routing engine picks (module 4).</description>
+    </key>
+    <key name="routing-mode" type="s">
+      <choices>
+        <choice value="auto"/>
+        <choice value="manual"/>
+      </choices>
+      <default>'auto'</default>
+      <summary>Model routing mode</summary>
+      <description>Auto lets the routing engine choose provider/model;
+      manual pins ai-provider/ai-model.</description>
+    </key>
+  </schema>
+</schemalist>

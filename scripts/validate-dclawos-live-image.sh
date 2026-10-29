@@ -56,6 +56,9 @@ for path in \
     usr/local/bin/dclawos-shell \
     usr/local/bin/dclawos-dashboard \
     usr/local/bin/dclawos-log-event \
+    usr/local/bin/dclawos-settings \
+    usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml \
+    usr/share/glib-2.0/schemas/gschemas.compiled \
     var/lib/dclawos \
     etc/lightdm/lightdm.conf.d/70-dclawos-autologin.conf \
     etc/xdg/openbox/autostart \
@@ -114,6 +117,10 @@ grep -q 'dclawos-dashboard' "$WORK/autostart-extract/etc/xdg/openbox/autostart" 
     echo "dashboard missing from session autostart" >&2
     exit 1
 }
+# Phase 2 module 3: settings app must be executable + valid Python.
+unsquashfs -d "$WORK/settings-extract" "$FS" usr/local/bin/dclawos-settings >/dev/null 2>&1
+test -x "$WORK/settings-extract/usr/local/bin/dclawos-settings"
+python3 -m py_compile "$WORK/settings-extract/usr/local/bin/dclawos-settings"
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 
