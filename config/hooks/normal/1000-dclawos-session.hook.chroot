@@ -1,0 +1,24 @@
+#!/bin/sh
+# DclawOS 2.0 live session setup (runs inside the image chroot).
+# Creates the live user, enables LightDM autologin into the Openbox session,
+# and sets the hostname. No live-config is installed on purpose.
+set -eu
+
+useradd -m -s /bin/bash -G sudo dclaw || true
+# Live-session sudo rule (narrow, documented): the live user may run
+# privileged commands without a password, matching the old DclawOS live
+# image behavior. AI actions are governed separately by the privilege
+# broker (Phase 2), not by this rule.
+printf '%s\n' 'dclaw ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/dclawos-live
+chmod 440 /etc/sudoers.d/dclawos-live
+
+printf '%s\n' 'dclawos' > /etc/hostname
+if ! grep -q 'dclawos' /etc/hosts 2>/dev/null; then
+    printf '%s\n' '127.0.1.1 dclawos' >> /etc/hosts
+fi
+
+# LightDM greeter fallback: autologin is configured in
+# includes.chroot/etc/lightdm/lightdm.conf.d/70-dclawos-autologin.conf.
+# Keep the lightdm system user home usable.
+mkdir -p /var/lib/lightdm
+chown lightdm:lightdm /var/lib/lightdm 2>/dev/null || true

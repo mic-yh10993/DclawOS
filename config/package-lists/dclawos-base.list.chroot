@@ -1,0 +1,17 @@
+# DclawOS 2.0 base: Debian Bookworm AMD64, live boot, systemd.
+# No live-config: the live user and graphical session are initialized by
+# the DclawOS-native hook (1000-dclawos-session) and LightDM autologin.
+live-boot
+systemd-sysv
+libpam-systemd
+linux-image-amd64
+firmware-linux
+firmware-misc-nonfree
+firmware-iwlwifi
+firmware-realtek
+sudo
+dbus
+network-manager
+ca-certificates
+curl
+kbd

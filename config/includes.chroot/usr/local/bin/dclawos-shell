@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""DclawOS shell, Phase 1 stub: bottom taskbar.
+
+Renders the bottom taskbar (always on top, full screen width) with the four
+confirmed slots — AI dashboard, Settings, Terminal, Chromium — plus a clock
+and a version label. Slot buttons are NOT wired yet: clicking one only logs
+the click (Phase 2 wires switching via the window manager).
+
+Reuse notes (evaluation cards §1, step 0 retrieval):
+- Taskbar shell itself: self-written. gnome-shell has NO bottom taskbar
+  component: `grep -rni "taskbar|task_bar|task-bar" gnome-shell/js/ui/`
+  only hits skip_taskbar flags (altTab.js, appMenu.js,
+  windowAttentionHandler.js) — retrieval is the proof, see the cards.
+- Status-area aggregation pattern (D-Bus subscriptions + menu aggregation)
+  is adapted from gnome-shell/js/ui/panel.js statusArea in Phase 2; this
+  stub intentionally contains no status icons yet.
+- Fullscreen switching / always-on-top call the compositor (mutter rows in
+  the cards) in Phase 2; here keep_above + DOCK hint are the Openbox-level
+  equivalents, not a copy of mutter code.
+// reuse-check: gnome-shell/js/ui/panel.js:470 statusArea not adopted yet,
+  reason: Phase 1 stub renders no status icons; pattern lands with §1 status
+  row in Phase 2.
+"""
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gtk, GLib  # noqa: E402
+
+SLOTS = ["AI 看板", "设置", "终端", "Chromium"]
+VERSION_LABEL = "DclawOS 2.0 · Phase 1"
+
+
+def log(msg):
+    try:
+        subprocess.run(["logger", "-t", "dclawos-shell", msg],
+                       check=False, timeout=5)
+    except Exception:
+        pass
+    print(f"dclawos-shell: {msg}", flush=True)
+
+
+class Taskbar(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-shell")
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.stick()
+
+        screen = Gdk.Screen.get_default()
+        width = screen.get_width() if screen else 1024
+        height = 48
+        self.set_default_size(width, height)
+        self.move(0, (screen.get_height() if screen else 768) - height)
+        self.set_size_request(width, height)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar.set_border_width(6)
+        self.add(bar)
+
+        for slot in SLOTS:
+            button = Gtk.Button(label=slot)
+            button.connect("clicked", self.on_slot_clicked, slot)
+            bar.pack_start(button, False, False, 0)
+
+        spacer = Gtk.Box()
+        bar.pack_start(spacer, True, True, 0)
+
+        self.clock = Gtk.Label(label="")
+        bar.pack_end(self.clock, False, False, 0)
+        version = Gtk.Label(label=VERSION_LABEL)
+        bar.pack_end(version, False, False, 0)
+        GLib.timeout_add_seconds(1, self.tick_clock)
+        self.tick_clock()
+
+    def tick_clock(self):
+        self.clock.set_text(time.strftime("%H:%M:%S"))
+        return True
+
+    def on_slot_clicked(self, _button, slot):
+        # Phase 1 stub: switching is wired in Phase 2 (§1 rows).
+        log(f"slot clicked (Phase 1 stub, not wired yet): {slot}")
+
+
+def main():
+    if not Gdk.Display.get_default():
+        print("dclawos-shell: no display available", file=sys.stderr)
+        return 1
+    log("dclawos-shell started (Phase 1 stub)")
+    win = Taskbar()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

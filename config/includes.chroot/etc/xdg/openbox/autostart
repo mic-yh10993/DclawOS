@@ -1,0 +1,6 @@
+# DclawOS session autostart (system-wide Openbox autostart).
+# The shell logs its own start to the system journal (via logger), which
+# the QEMU smoke test uses as the "graphical session reached" marker:
+# journald forwards the system journal to the serial console.
+logger -t dclawos-session "openbox autostart: launching dclawos-shell"
+dclawos-shell &

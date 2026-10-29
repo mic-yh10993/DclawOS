@@ -1,0 +1,21 @@
+# DclawOS 2.0 desktop: minimal X11 session (Openbox) + DclawOS shell.
+# Deliberately NOT a full GNOME desktop: no gnome-shell, no gdm3, no
+# gnome-control-center, no nautilus, no Firefox, no Office, no image/video
+# viewers. The shell, dashboard, settings app and agent service are
+# DclawOS-native and land module by module.
+xorg
+xauth
+x11-xserver-utils
+x11-utils
+dbus-x11
+policykit-1
+lightdm
+lightdm-gtk-greeter
+openbox
+python3
+python3-gi
+gir1.2-gtk-3.0
+gir1.2-wnck-3.0
+upower
+fonts-wqy-zenhei
+xterm

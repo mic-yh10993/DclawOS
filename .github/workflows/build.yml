@@ -1,0 +1,291 @@
+---
+name: Build DclawOS Live ISO
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dclawos-live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build DclawOS LiveCD image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Mechanical guard carried over from the old DclawOS pipeline: a
+      # comment line placed between \-continuations of a multi-line shell
+      # command terminates the command early and the next flag runs as its
+      # own command -> "command not found" (exit 127). bash -n does NOT
+      # catch this, so this step fails the workflow fast with the
+      # offending line number.
+      - name: Lint workflow for comments inside shell continuations
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import re, sys
+          lines = open('.github/workflows/build.yml').read().split('\n')
+          bad = []
+          for i, ln in enumerate(lines):
+              s = ln.strip()
+              if not s.startswith('#'):
+                  continue
+              j = i - 1
+              while j >= 0 and lines[j].strip() == '':
+                  j -= 1
+              if j < 0:
+                  continue
+              prev = lines[j].rstrip()
+              m = re.search(r'(\\+)$', prev)
+              if m and len(m.group(1)) % 2 == 1:
+                  bad.append((i + 1, s[:80]))
+          if bad:
+              print('FATAL: comment line(s) inside shell \\-continuation:')
+              for ln_no, txt in bad:
+                  print(f'  build.yml line {ln_no}: {txt}')
+              print('Move the comment above or below the continued command;')
+              print('never between its backslash continuations.')
+              sys.exit(1)
+          print('workflow continuation lint: OK')
+          PYEOF
+
+      - name: Show host capacity
+        run: |
+          df -h /
+          free -h
+
+      - name: Free runner disk space
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Install live-build host tooling
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+          cat <<'EOF' | sudo tee /etc/apt/sources.list
+          deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          EOF
+          sudo timeout 12m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 update
+          sudo timeout 12m apt-get install -y --no-install-recommends \
+            live-build debootstrap debian-archive-keyring squashfs-tools xorriso grub-pc-bin \
+            grub-efi-amd64-bin isolinux syslinux syslinux-common syslinux-utils mtools dosfstools gpg cpio jq initramfs-tools-core socat qemu-system-x86 ovmf desktop-file-utils
+          lb --version
+
+      - name: Configure DclawOS live-build image
+        run: |
+          set -euxo pipefail
+          sudo rm -rf lb .build stage cache auto chroot binary binary.tmp *.iso build.log 2>/dev/null || true
+          # NOTE: never put comment lines between the \-continuations of the
+          # lb config command below; bash strips the backslash-newline before
+          # parsing comments, which terminates the command early and turns the
+          # next flag (e.g. --compression) into a "command not found" (exit 127).
+          sudo GENISOIMAGE_OPTIONS_EXTRA="-allow-limited-size" lb config \
+            --ignore-system-defaults \
+            --mode debian \
+            --initramfs live-boot \
+            --initsystem systemd \
+            --distribution bookworm \
+            --architectures amd64 \
+            --linux-packages linux-image \
+            --archive-areas "main contrib non-free non-free-firmware" \
+            --mirror-bootstrap "http://deb.debian.org/debian" \
+            --parent-mirror-bootstrap "http://deb.debian.org/debian" \
+            --mirror-chroot "http://deb.debian.org/debian" \
+            --parent-mirror-chroot "http://deb.debian.org/debian" \
+            --mirror-chroot-security "http://security.debian.org/debian-security" \
+            --parent-mirror-chroot-security "http://security.debian.org/debian-security" \
+            --mirror-binary "http://deb.debian.org/debian" \
+            --parent-mirror-binary "http://deb.debian.org/debian" \
+            --mirror-binary-security "http://security.debian.org/debian-security" \
+            --parent-mirror-binary-security "http://security.debian.org/debian-security" \
+            --security false \
+            --mirror-debian-installer "http://deb.debian.org/debian" \
+            --keyring-packages "debian-archive-keyring" \
+            --binary-images iso-hybrid \
+            --compression gzip \
+            --bootappend-live "components splash console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1" \
+            --iso-application "DclawOS Live" \
+            --iso-publisher "SYSTEM-Intel-MIC" \
+            --iso-volume "DclawOS 2.0" \
+            --source false \
+            --zsync false \
+            --firmware-chroot false \
+            --apt-recommends false \
+            --debian-installer false
+
+          sudo bash scripts/prepare-dclawos-live-build-compression.sh
+
+          sudo chmod 755 config/hooks/*.chroot \
+            config/includes.chroot/usr/local/bin/dclawos-shell
+          sudo cp -f /usr/lib/ISOLINUX/isolinux.bin config/bootloaders/isolinux/isolinux.bin
+          sudo cp -f /usr/lib/syslinux/modules/bios/*.c32 config/bootloaders/isolinux/
+          test -s config/bootloaders/isolinux/isolinux.bin
+          test -s config/bootloaders/isolinux/ldlinux.c32
+          test -s config/bootloaders/isolinux/libcom32.c32
+          test -s config/bootloaders/isolinux/libutil.c32
+          test -s config/bootloaders/isolinux/vesamenu.c32
+          sudo find config -maxdepth 4 -type f -printf '%p\n' | sort | head -200
+
+      - name: Build DclawOS ISO
+        run: |
+          set -euxo pipefail
+          echo "DclawOS build started: $(date --iso-8601=seconds)" | tee build.log
+          sudo lb build 2>&1 | tee -a build.log
+          sudo rm -rf chroot chroot.tmp 2>/dev/null || true
+          df -h /
+          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          test -n "$ISO_SOURCE"
+          chmod 755 scripts/repack-dclawos-dualboot-iso.sh
+          DCLAWOS_BINARY_TREE="$GITHUB_WORKSPACE/binary" \
+            bash scripts/repack-dclawos-dualboot-iso.sh "$ISO_SOURCE" 2>&1 | tee -a build.log
+          echo "DclawOS dual BIOS/UEFI ISO finished: $(date --iso-8601=seconds)" | tee -a build.log
+
+      - name: Reclaim disk before verification
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf lb .build stage cache chroot binary binary.tmp 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          df -h /
+
+      - name: Verify DclawOS ISO
+        id: iso
+        run: |
+          set -euxo pipefail
+          ISO_SOURCE="$(find . -maxdepth 2 -type f \( -name '*DclawOS*.iso' -o -name '*.hybrid.iso' \) | head -n1)"
+          test -n "$ISO_SOURCE"
+          test -s "$ISO_SOURCE"
+          ISO="DclawOS-2.0-amd64-livecd.iso"
+          mv "$ISO_SOURCE" "$ISO"
+          test -s "$ISO"
+          echo "iso_path=$ISO" >> "$GITHUB_OUTPUT"
+          xorriso -indev "$ISO" -report_el_torito plain 2>&1 | tee iso-boot-report.txt
+          BOOT_CHECK="$(mktemp -d)"
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/ldlinux.c32 "$BOOT_CHECK/ldlinux.c32" >/dev/null 2>&1
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/vesamenu.c32 "$BOOT_CHECK/vesamenu.c32" >/dev/null 2>&1
+          xorriso -osirrox on -indev "$ISO" -extract /efi.img "$BOOT_CHECK/efi.img" >/dev/null 2>&1
+          test -s "$BOOT_CHECK/ldlinux.c32"
+          test -s "$BOOT_CHECK/vesamenu.c32"
+          test -s "$BOOT_CHECK/efi.img"
+          rm -rf "$BOOT_CHECK"
+          grep -q -E 'El Torito boot img.*BIOS|El Torito boot img.*UEFI|EFI|efi.img|isolinux' iso-boot-report.txt
+          chmod 755 scripts/validate-dclawos-live-image.sh
+          sudo bash scripts/validate-dclawos-live-image.sh "$ISO"
+          sha256sum "$ISO" | tee DclawOS-2.0-amd64-livecd.iso.sha256
+          cat > DclawOS-2.0-release-notes.md <<EOF
+          # DclawOS 2.0 Preview (reboot) — LiveCD image
+
+          Build: ${GITHUB_RUN_NUMBER}
+          Commit: ${GITHUB_SHA}
+
+          Phase 1 of the from-scratch reboot: a bootable Debian Bookworm live
+          image with a minimal desktop session (Openbox + the DclawOS shell
+          stub: bottom taskbar with AI / Settings / Terminal / Chromium slots
+          and a clock). The taskbar buttons, dashboard, settings app, agent
+          service, privilege broker and editor are NOT yet implemented; they
+          land module by module in later builds. No full GNOME desktop, no
+          Firefox, no Office, no image/video viewers — by design.
+
+          Verify the ISO before writing it to USB:
+
+          \`\`\`sh
+          sha256sum -c DclawOS-2.0-amd64-livecd.iso.sha256
+          \`\`\`
+
+          Note: the build pipeline and QEMU BIOS/UEFI smoke checks verify that
+          the image boots to a graphical session. Behavior on real hardware
+          still awaits physical-machine verification — do not advertise this
+          preview as "ready out of the box" yet.
+          EOF
+          ls -lh "$ISO" DclawOS-2.0-amd64-livecd.iso.sha256 DclawOS-2.0-release-notes.md build.log
+
+      - name: Smoke boot DclawOS 2.0 ISO in QEMU BIOS and UEFI
+        run: |
+          set -euxo pipefail
+          chmod 755 scripts/qemu-boot-smoke.sh scripts/validate-qemu-visual-frame.py
+          bash scripts/qemu-boot-smoke.sh "${{ steps.iso.outputs.iso_path }}" bios 260
+          bash scripts/qemu-boot-smoke.sh "${{ steps.iso.outputs.iso_path }}" uefi 260
+
+      - name: Split ISO for GitHub release upload
+        id: splitpkg
+        if: (github.ref == 'refs/heads/main') && success()
+        run: |
+          set -euxo pipefail
+          ISO="${{ steps.iso.outputs.iso_path }}"
+          LIMIT=2000000000
+          SIZE=$(stat -c%s "$ISO")
+          echo "ISO size: $SIZE bytes (release-asset limit: $LIMIT)"
+          FILES=()
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "ISO exceeds the 2GiB release-asset limit; splitting into 1900M parts"
+            split -b 1900M -d --suffix-length=3 --numeric-suffixes=1 "$ISO" "${ISO}."
+            ls -lh "${ISO}".[0-9]*
+            sha256sum "${ISO}".[0-9]* > "${ISO}.parts.sha256"
+            cat "${ISO}".parts.sha256
+            FILES=("${ISO}".[0-9]* "${ISO}.parts.sha256")
+            ISO_GB="$(awk "BEGIN {printf \"%.1f\", $SIZE/1073741824}")"
+            cat >> DclawOS-2.0-release-notes.md <<'EOF'
+
+          ## 下载说明（ISO 超过 2GiB，已分卷）
+
+          GitHub Release 单个附件上限 2GiB，本版 ISO 约 __ISO_GB__GiB，已按 1900M 分卷上传。
+          下载全部 DclawOS-2.0-amd64-livecd.iso.0* 文件后合并：
+
+          ```sh
+          cat DclawOS-2.0-amd64-livecd.iso.0* > DclawOS-2.0-amd64-livecd.iso
+          sha256sum -c DclawOS-2.0-amd64-livecd.iso.sha256
+          ```
+          EOF
+            sed -i "s/__ISO_GB__/$ISO_GB/" DclawOS-2.0-release-notes.md || true
+          else
+            echo "ISO fits the 2GiB release-asset limit; uploading whole"
+            FILES=("$ISO")
+          fi
+          {
+            echo "files<<SPLITPKG_EOF"
+            printf '%s\n' "${FILES[@]}"
+            echo "SPLITPKG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish DclawOS 2.0 Preview Release
+        if: (github.ref == 'refs/heads/main') && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dclawos-2.0-preview-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: DclawOS 2.0 Preview Build ${{ github.run_number }}
+          body_path: DclawOS-2.0-release-notes.md
+          prerelease: true
+          files: |
+            ${{ steps.splitpkg.outputs.files }}
+            DclawOS-2.0-amd64-livecd.iso.sha256
+            DclawOS-2.0-release-notes.md
+            DclawOS-2.0-amd64-livecd.iso.bios.ppm
+            DclawOS-2.0-amd64-livecd.iso.uefi.ppm
+            build.log
+            iso-boot-report.txt
+
+      - name: Cleanup runner disk
+        if: always()
+        run: |
+          sudo rm -rf lb .build stage cache chroot binary binary.tmp 2>/dev/null || true
+          df -h /
