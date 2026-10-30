@@ -109,6 +109,9 @@ python3 -m json.tool "$ENGINE_OUT/catalog.json" > /dev/null || {
 # LLM executor gate: real execution against a local mock endpoint
 # (no real keys, no external network).
 /usr/local/bin/dclawos-llm --selftest
+# AccountFallback gate (Phase 4 module 3): lockout lifecycle,
+# classification signals, file-state adapter persistence.
+/usr/local/bin/dclawos-llm --selftest-fallback
 
 # 5. Cleanup (keep /opt/dclawos-node runtime + engine outputs + source).
 cd /

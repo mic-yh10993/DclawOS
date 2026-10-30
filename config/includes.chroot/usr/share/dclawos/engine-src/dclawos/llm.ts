@@ -43,6 +43,30 @@ import { dispatch, type DispatchTarget } from "./dispatch";
 import { decideRouting } from "./decision";
 import { getRegistryEntry } from "../open-sse/config/providerRegistry";
 import { getModelPricing } from "../open-sse/services/providerCostData";
+import {
+  isModelLocked,
+  recordModelLockoutFailure,
+  recordProviderFailure,
+  recordProviderSuccess,
+  classifyLockoutReason,
+} from "../open-sse/services/accountFallback";
+
+// Phase 4 module 3 (gap row B1): the full accountFallback transplant
+// is wired into the executor. DclawOS holds ONE credential per
+// provider, so the provider id doubles as the connection id (the
+// upstream connection scope collapses to the credential scope).
+// - Before an attempt: a model locked by accountFallback is skipped
+//   without a network call (reported as a durable 429 attempt).
+// - On failure: recordProviderFailure feeds the provider breaker;
+//   429/quota failures also record a model lockout failure with
+//   upstream's classifyLockoutReason.
+// - On success: recordProviderSuccess resets the breaker/cooldown
+//   failure count (upstream semantics).
+const FALLBACK_LOCKOUT_COOLDOWN_MS = 60_000;
+
+function connectionIdFor(provider: string): string {
+  return provider;
+}
 
 export interface LlmMessage {
   role: string;
@@ -159,6 +183,35 @@ export function computeCost(
 }
 
 async function executeTarget(
+  request: LlmRequest,
+  target: DispatchTarget,
+  signal: AbortSignal | undefined
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const connId = connectionIdFor(target.provider);
+  if (isModelLocked(target.provider, connId, target.model)) {
+    return {
+      ok: false,
+      status: 429,
+      body: { error: "model locked by accountFallback (cooldown)" },
+    };
+  }
+  const outcome = await executeTargetInner(request, target, signal);
+  if (outcome.ok) {
+    recordProviderSuccess(target.provider, connId);
+  } else {
+    recordProviderFailure(target.provider, undefined, connId);
+    if (outcome.status === 429 || outcome.status === 402 ||
+        outcome.status === 403) {
+      recordModelLockoutFailure(
+        target.provider, connId, target.model,
+        classifyLockoutReason(outcome.status), outcome.status,
+        FALLBACK_LOCKOUT_COOLDOWN_MS);
+    }
+  }
+  return outcome;
+}
+
+async function executeTargetInner(
   request: LlmRequest,
   target: DispatchTarget,
   signal: AbortSignal | undefined
@@ -304,3 +357,21 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
 }
 
 export const DCLAWOS_LLM_MARKER = "dclawos-llm-executor-v1";
+
+// Re-exported for the dclawos-llm --selftest-fallback gate: the
+// accountFallback surface the executor is wired to (module 3).
+export {
+  isModelLocked,
+  lockModel,
+  clearModelLock,
+  getModelLockoutInfo,
+  isProviderInCooldown,
+  getProviderBreakerState,
+  classifyLockoutReason,
+  isAccountDeactivated,
+  isCreditsExhausted,
+} from "../open-sse/services/accountFallback";
+export {
+  setConnectionRateLimitUntil,
+  getConnectionRateLimitUntil,
+} from "../open-sse/services/dbAdapter";

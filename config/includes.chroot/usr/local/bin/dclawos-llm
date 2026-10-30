@@ -18,7 +18,30 @@
 // from its 0600 secret files. Keys are never printed or logged.
 "use strict";
 
-const { runLlm, DCLAWOS_LLM_MARKER } = require("/usr/share/dclawos/engine/llm.js");
+// The accountFallback graph (Phase 4 module 3) contains upstream's
+// migrationRunner, whose top level resolves a migrations directory
+// and throws when none exists. The SQL migrations ship in the
+// engine source tree (they are never RUN here - no gateway DB is
+// opened; every DB touchpoint is mapped to file-state adapters),
+// so point the resolver at them before loading the bundle.
+if (!process.env.OMNIROUTE_MIGRATIONS_DIR) {
+  process.env.OMNIROUTE_MIGRATIONS_DIR =
+    "/usr/share/dclawos/engine-src/src/lib/db/migrations";
+}
+
+const {
+  runLlm,
+  DCLAWOS_LLM_MARKER,
+  isModelLocked,
+  lockModel,
+  clearModelLock,
+  getModelLockoutInfo,
+  classifyLockoutReason,
+  isAccountDeactivated,
+  isCreditsExhausted,
+  setConnectionRateLimitUntil,
+  getConnectionRateLimitUntil,
+} = require("/usr/share/dclawos/engine/llm.js");
 
 function fail(message) {
   console.error(`dclawos-llm --selftest FAILED: ${message}`);
@@ -185,7 +208,55 @@ async function selftest() {
   }
 }
 
+async function selftestFallback() {
+  // Phase 4 module 3 gate: the transplanted accountFallback must
+  // behave (lockout lifecycle, classification signals) and the
+  // file-state DB adapter must persist rate-limit timestamps.
+  const os = require("os");
+  const fs = require("fs");
+  process.env.DCLAWOS_STATE_DIR = fs.mkdtempSync(
+    `${os.tmpdir()}/dclawos-fallback-test-`);
+  if (isModelLocked("openai", "openai", "gpt-4o-mini")) {
+    fail("model locked before any lock");
+  }
+  lockModel("openai", "openai", "gpt-4o-mini", "quota_exceeded", 60000);
+  if (!isModelLocked("openai", "openai", "gpt-4o-mini")) {
+    fail("model not locked after lockModel");
+  }
+  const info = getModelLockoutInfo("openai", "openai", "gpt-4o-mini");
+  if (!info || !(info.remainingMs > 0)) fail("lockout info missing");
+  clearModelLock("openai", "openai", "gpt-4o-mini");
+  if (isModelLocked("openai", "openai", "gpt-4o-mini")) {
+    fail("model still locked after clearModelLock");
+  }
+  if (!isAccountDeactivated("your account has been deactivated")) {
+    fail("account-deactivated signal not classified");
+  }
+  if (!isCreditsExhausted("insufficient credits")) {
+    fail("credits-exhausted signal not classified");
+  }
+  if (typeof classifyLockoutReason(429) !== "string") {
+    fail("classifyLockoutReason(429) broken");
+  }
+  await setConnectionRateLimitUntil("conn-x", "2030-01-01T00:00:00.000Z");
+  if (getConnectionRateLimitUntil("conn-x") !== "2030-01-01T00:00:00.000Z") {
+    fail("dbAdapter rate-limit persistence broken");
+  }
+  await setConnectionRateLimitUntil("conn-x", null);
+  if (getConnectionRateLimitUntil("conn-x") !== null) {
+    fail("dbAdapter rate-limit clear broken");
+  }
+  console.log(
+    "dclawos-llm --selftest-fallback OK: accountFallback lockout " +
+      "lifecycle, classification signals and file-state adapter " +
+      "persistence verified");
+}
+
 async function main() {
+  if (process.argv.includes("--selftest-fallback")) {
+    await selftestFallback();
+    return;
+  }
   if (process.argv.includes("--selftest")) {
     await selftest();
     return;

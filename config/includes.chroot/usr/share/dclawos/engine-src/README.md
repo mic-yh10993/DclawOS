@@ -189,3 +189,35 @@ Compiled at image build time (NOT a prebuilt blob) by hook
   `providerCostData` pricing, `cost_envelope` emitted per executed
   request. Build hook runs `dclawos-llm --selftest` against a local
   mock endpoint; no real keys exist in the build.
+
+## Phase 4 module 3 additions (accountFallback full transplant)
+
+- Copied verbatim (MIT) from OmniRoute open-sse: services/
+  accountFallback.ts (2,569 lines) + services/accountFallback/
+  (10 files), rotationConfig, passthroughRegistry,
+  modelAccessDenied, providerCooldownTracker,
+  antigravityQuotaFamily, antigravityFamilyCooldown,
+  geminiRateLimitTracker, googleDailyQuota, dailyQuotaReset,
+  quotaTextCooldowns, quotaResetParsing, accountSemaphore,
+  combo/comboCooldownRetry, usage/moonshotOpenPlatform,
+  config/{constants, providerErrorRules, codexQuotaScopes,
+  credentialLoader, geminiRateLimits.json}, utils/
+  contentPolicyError; from src/: lib/resilience/ (whole),
+  lib/quota/boundedMap, shared/utils/providerHints,
+  lib/db/adapters/sqljsAdapter, lib/db/migrations (214 SQL files,
+  shipped for the upstream migrationRunner's directory resolver;
+  never executed — no gateway DB is opened), lib/db/settings.ts
+  is a DclawOS adapter (pricing delegation, see its header).
+- Adaptations (each recorded at the file): open-sse/services/
+  dbAdapter.ts maps the closure's ONLY direct DB touchpoints
+  (setConnectionRateLimitUntil, getRawProviderConnections) onto
+  the file-state store; src/lib/db/readCache.ts is REPLACED by a
+  DclawOS adapter with upstream's exported surface backed by
+  local sources (empty-DB semantics, which is the factual local
+  state); src/shared/utils/logger.ts is a DclawOS shim for the
+  createLogger surface (upstream is pino-based); three import
+  lines in copied files point at the adapter.
+- Wiring: dclawos/llm.ts executor consults isModelLocked before
+  an attempt (locked = durable 429, no network call) and records
+  provider failures/successes + model lockout failures into
+  accountFallback. Gate: dclawos-llm --selftest-fallback.
