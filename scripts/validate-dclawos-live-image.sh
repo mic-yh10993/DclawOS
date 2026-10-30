@@ -573,6 +573,27 @@ if grep -q 'apply_theme' "$WORK/theme-shell/usr/local/bin/dclawos-shell"; then
     exit 1
 fi
 
+# Phase 5 module 1: third-party channel runtime (WS1). channellib
+# + the Telegram adapter + the channel gate test must be present
+# and syntactically valid; the daemon must poll channels and route
+# replies through them; the settings GUI must carry the channels
+# page. Behavior is gated at build time by hook 1008 (mock Bot API).
+for lib in channellib channel_telegram channeltest registrylib; do
+    unsquashfs -d "$WORK/${lib}-p5-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p5-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p5-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q '_poll_channels' "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" || {
+    echo "agent daemon does not poll channels" >&2
+    exit 1
+}
+grep -q 'normalize_channel' "$WORK/registrylib-p5-extract/usr/local/lib/dclawos/registrylib.py" || {
+    echo "registry lib lacks the channels category" >&2
+    exit 1
+}
+# NOTE: the settings channels-page assertion lives in the Phase 5
+# module 5 block above: the settings binary lands with that module.
+
 # Initramfs must contain live-boot (the live session depends on it).
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2

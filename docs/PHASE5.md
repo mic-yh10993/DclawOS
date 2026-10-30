@@ -54,13 +54,13 @@ and are not copied (see per-file // reuse-check notes).
 
 | # | Item | State |
 |---|---|---|
-| W1.0 | Channel framework: registry category, channellib, daemon wiring, pending-reply via channel+chat, settings 渠道 page | OPEN (P5-M1) |
-| W1.1 | Telegram (Bot API long-poll getUpdates; sendMessage) | OPEN (P5-M1) |
-| W1.2 | Discord (REST poll of a configured channel; send) | OPEN (P5-M2) |
-| W1.3 | Slack (Socket Mode; needs app+bot tokens and a websocket client path) | OPEN (P5-M2, evaluation-gated) |
-| W1.4 | WhatsApp (evaluation: Cloud API is webhook-only inbound; Baileys is unofficial/QR) | OPEN (P5-M3, evaluation) |
-| W1.5 | Matrix (client-server /sync long-poll, user access token) | OPEN (P5-M3) |
-| W1.6 | Signal / Teams / Feishu / LINE / others in reference | OPEN (evaluated in P5-M3; named outcome per channel) |
+| W1.0 | Channel framework: registry category, channellib, daemon wiring, pending-reply via channel+chat, settings 渠道 page | CLOSED (P5-M1): registrylib `channels` category + channellib (adapter lazy-load by kind, central allowlist filter — a sender not on the allowlist is dropped and counted in channel state, adapters cannot widen it; per-channel state file = adapter cursor). Daemon polls channels on the existing connector cycle; replies flush via the shared pending map ({"channel", "chat"} routes). Settings 渠道 page ships in P5-M5's settings landing (single settings binary). Gate: hook 1008 channeltest (mock servers) + validate assertions |
+| W1.1 | Telegram (Bot API long-poll getUpdates; sendMessage) | CLOSED (P5-M1): stdlib Bot API adapter; adapter-owned offset cursor advances past EVERY update (exactly-once); text messages only; sendMessage chunked at 4000; chat fallback state.last_chat → options.default_chat. Mock-gated |
+| W1.2 | Discord (REST poll of a configured channel; send) | CLOSED (P5-M2): REST short-poll of ONE configured channel (options.channel_id) on the daemon cycle; snowflake cursor; bot's own messages skipped (id learned via /users/@me); send chunked at 2000. NAMED TRADEOFF: the gateway WebSocket transport was NOT implemented — the adapter contract is poll-shaped and the 30 s cycle bounds latency; gateway session supervision would be a separate larger module |
+| W1.3 | Slack (Socket Mode; needs app+bot tokens and a websocket client path) | CLOSED (P5-M2): Socket Mode via a per-channel background receiver thread (apps.connections.open → websocket-client, envelope ack, disconnect → reconnect; only message events, subtypes/bot messages skipped); poll() drains the buffer. Two secrets: bot token (entry secret) + app token (secret name + "-app"); needs python3-websocket (packaged). NAMED BOUNDARY: Socket Mode has NO history backfill — messages sent while the machine was off are never recovered |
+| W1.4 | WhatsApp (evaluation: Cloud API is webhook-only inbound; Baileys is unofficial/QR) | BLOCKED-NAMED (P5-M3): (a) official Cloud API delivers inbound ONLY as webhooks to a public HTTPS endpoint — a headless home system has none and DclawOS runs no public ingress by design; outbound-only would fake support. (b) The Baileys route upstream ships (extensions/whatsapp, login via QR pairing state machine) binds a PERSONAL account through unofficial protocol emulation: brittle against protocol changes and a ToS/account-ban risk for the user's own number. Not faked. Revisit only if the user accepts a public endpoint or the Baileys risk explicitly |
+| W1.5 | Matrix (client-server /sync long-poll, user access token) | CLOSED (P5-M3): /sync with since-token (options.homeserver required); FIRST poll only establishes next_batch (no history replay); own messages skipped (whoami). NAMED BOUNDARY: no E2EE — m.room.encrypted events advance the cursor but never become tasks (upstream crypto SDK is out of stdlib scope); use unencrypted rooms. Mock-gated |
+| W1.6 | Signal / Teams / Feishu / LINE / others in reference | NAMED OUTCOMES (P5-M3, evidence: PHASE5-CHANNEL-INVENTORY §8): Signal BLOCKED-NAMED — needs an external signal-cli daemon (extensions/signal accounts.ts:232); linking is a daemon operation, not a token; own packaging module if wanted. LINE BLOCKED-NAMED — webhook-only official API + public HTTPS. Feishu/Lark BLOCKED-NAMED for now — webhook mode needs a public endpoint; the WS long-connection mode exists only via the official JS SDK (a stdlib implementation is its own project). Google Chat BLOCKED-NAMED this phase — service-account + Workspace-admin provisioning dominates, not a Settings-completable bot-token flow. iMessage BLOCKED-NAMED (platform) — macOS-only (~/Library/Messages/chat.db via imsg bridge), DclawOS is Linux. IRC EVALUATED-FEASIBLE, deferred — plain TCP/TLS, token-free; a small stdlib adapter can land later without framework changes. Mattermost EVALUATED-FEASIBLE, deferred — token REST+WS against a self-hosted server |
 
 ## WS2 — Agent can invoke everything (self-provisioning)
 
@@ -107,7 +107,8 @@ palette alignment).
 
 | Module | Commit | Run | Result |
 |---|---|---|---|
-| P5-M0 ledger + UI-RULES docs | (this commit) | — | pending |
+| P5-M0 ledger + UI-RULES docs | 25bffbf | 41090974570 (#43) | success |
+| P5-M1..M3 WS1 channels (framework, Telegram, Discord, Slack, Matrix) | (this commit) | — | pending |
 
 ## Unverified / honesty boundary
 

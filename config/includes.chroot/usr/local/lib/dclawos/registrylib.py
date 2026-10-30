@@ -101,10 +101,23 @@ def normalize_skill(entry):
 
 
 def normalize_server(entry):
+    # Phase 5: a server is either stdio (command required) or
+    # streamable HTTP (url required, transport == "http"). The
+    # original shape (id/name/command) is unchanged for stdio.
     normalized = _normalize(
-        entry, ("id", "name", "command"),
-        {"args": [], "env": {}, "description": "", "license": "",
-         "enabled": True})
+        entry, ("id", "name"),
+        {"command": "", "args": [], "env": {}, "description": "",
+         "license": "", "enabled": True, "transport": "stdio",
+         "url": ""})
+    if normalized["transport"] == "http":
+        url = normalized["url"]
+        if not isinstance(url, str) or not url.startswith(
+                ("http://", "https://")):
+            raise ValueError(
+                "http mcp server needs an http(s) 'url'")
+    elif not isinstance(normalized["command"], str) or \
+            not normalized["command"]:
+        raise ValueError("entry missing required field: command")
     if not isinstance(normalized["args"], list) or not all(
             isinstance(a, str) for a in normalized["args"]):
         raise ValueError("server 'args' must be a list of strings")
@@ -132,6 +145,32 @@ def normalize_connector(entry):
     return normalized
 
 
+# Phase 5 (WS1): channels are a fourth registry category. A channel
+# is a third-party messaging service (Telegram, Discord, ...) the
+# agent daemon polls through channellib's built-in adapters —
+# unlike connectors, a channel is NOT an arbitrary command: "kind"
+# selects a built-in adapter module, "secret" names the agent
+# secret file holding the bot token (written only by the human via
+# the broker write-secret op), and "allowlist" holds the owner
+# account ids allowed to talk to the agent (sender ids as strings;
+# an empty allowlist lets NOBODY in). Unknown fields round-trip.
+def normalize_channel(entry):
+    normalized = _normalize(
+        entry, ("id", "name", "kind"),
+        {"description": "", "license": "", "enabled": True,
+         "allowlist": [], "secret": "", "options": {}})
+    allowlist = normalized["allowlist"]
+    if not isinstance(allowlist, list) or not all(
+            isinstance(a, (str, int)) for a in allowlist):
+        raise ValueError("channel 'allowlist' must be a list of ids")
+    normalized["allowlist"] = [str(a) for a in allowlist]
+    if not isinstance(normalized["secret"], str):
+        raise ValueError("channel 'secret' must be a string")
+    if not isinstance(normalized["options"], dict):
+        raise ValueError("channel 'options' must be an object")
+    return normalized
+
+
 def load_registry(path=None):
     if path is None:
         path = registry_path()
@@ -139,16 +178,19 @@ def load_registry(path=None):
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
-        return {"skills": [], "mcp_servers": [], "connectors": []}, 0
+        return {"skills": [], "mcp_servers": [], "connectors": [],
+                "channels": []}, 0
     except (OSError, ValueError) as exc:
         raise ValueError(f"registry unreadable: {exc}")
     if not isinstance(data, dict):
         raise ValueError("registry root is not an object")
-    result = {"skills": [], "mcp_servers": [], "connectors": []}
+    result = {"skills": [], "mcp_servers": [], "connectors": [],
+              "channels": []}
     skipped = 0
     for kind, normalizer in (("skills", normalize_skill),
                              ("mcp_servers", normalize_server),
-                             ("connectors", normalize_connector)):
+                             ("connectors", normalize_connector),
+                             ("channels", normalize_channel)):
         entries = data.get(kind, [])
         if not isinstance(entries, list):
             raise ValueError(f"registry field {kind!r} is not a list")
@@ -202,6 +244,15 @@ def add_connector(data, entry):
         raise ValueError(
             f"connector id already exists: {normalized['id']!r}")
     data["connectors"].append(normalized)
+    return normalized
+
+
+def add_channel(data, entry):
+    normalized = normalize_channel(entry)
+    if _find(data, "channels", normalized["id"]) is not None:
+        raise ValueError(
+            f"channel id already exists: {normalized['id']!r}")
+    data["channels"].append(normalized)
     return normalized
 
 

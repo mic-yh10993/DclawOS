@@ -16,3 +16,13 @@ set -eu
     exit 1
 }
 python3 /usr/local/lib/dclawos/agentlooptest.py
+
+# Phase 5 module 1: channel runtime behavior gate. Same pattern:
+# real channellib + Telegram adapter + daemon poll/flush against a
+# local mock Bot API server (dummy token, no external network):
+# allowlist filtering, cursor once-only delivery, reply routing.
+[ -f /usr/local/lib/dclawos/channeltest.py ] || {
+    echo "dclawos-chantest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/channeltest.py

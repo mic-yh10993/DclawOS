@@ -21,7 +21,10 @@ Polls the task queue (/var/lib/dclawos/tasks/) and executes tasks:
 Tools (see agentlib.classify for the approval tier of each):
   shell, read_file, write_file, list_files, service_status,
   service_restart, package_install, route_decide, mcp_call,
-  skill_run, subagent, takeover_request, connector_send.
+  skill_run, subagent, takeover_request, connector_send,
+  registry_list, skill_install, skill_remove, mcp_add,
+  mcp_remove, channel_manage (Phase 5 WS2 self-provisioning:
+  provisioninglib, validated installs with rollback).
 Privileged operations go through the ticket broker (root daemon):
 the service never runs sudo itself and never holds privileges.
 
@@ -220,6 +223,24 @@ def _broker_tool(ticket_id, operation, params):
     return reply.get("result")
 
 
+def _unit_params(params):
+    """WS2 audit §2 (latent bug): the model-facing schemas name
+    the service param {name}; the broker validates {unit}. Both
+    shapes are accepted here; the broker always receives {unit}."""
+    out = dict(params)
+    if not out.get("unit") and out.get("name"):
+        out["unit"] = out["name"]
+    return out
+
+
+def _package_params(params):
+    """Same audit fix as _unit_params, for {name} -> {package}."""
+    out = dict(params)
+    if not out.get("package") and out.get("name"):
+        out["package"] = out["name"]
+    return out
+
+
 def _route_decide(params):
     proc = subprocess.run(["dclawos-route"], input=None,
                           capture_output=True, text=True, timeout=60)
@@ -328,11 +349,14 @@ def execute_step(task, step):
     if tool == "list_files":
         return _list_files(params)
     if tool == "service_status":
-        return _broker_tool(ticket_id, "service-status", params)
+        return _broker_tool(ticket_id, "service-status",
+                            _unit_params(params))
     if tool == "service_restart":
-        return _broker_tool(ticket_id, "restart-service", params)
+        return _broker_tool(ticket_id, "restart-service",
+                            _unit_params(params))
     if tool == "package_install":
-        return _broker_tool(ticket_id, "package-install", params)
+        return _broker_tool(ticket_id, "package-install",
+                            _package_params(params))
     if tool == "route_decide":
         return _route_decide(params)
     if tool == "mcp_call":
@@ -345,6 +369,24 @@ def execute_step(task, step):
         import connectorlib
         return connectorlib.send_message(
             params.get("connector", ""), params.get("message", ""))
+    if tool == "registry_list":
+        import provisioninglib
+        return provisioninglib.registry_list(params)
+    if tool == "skill_install":
+        import provisioninglib
+        return provisioninglib.skill_install(params)
+    if tool == "skill_remove":
+        import provisioninglib
+        return provisioninglib.skill_remove(params)
+    if tool == "mcp_add":
+        import provisioninglib
+        return provisioninglib.mcp_add(params)
+    if tool == "mcp_remove":
+        import provisioninglib
+        return provisioninglib.mcp_remove(params)
+    if tool == "channel_manage":
+        import provisioninglib
+        return provisioninglib.channel_manage(params)
     if tool == "subagent":
         return _subagent(params, task)
     if tool == "cron":
@@ -682,6 +724,53 @@ def _connector_session(connector_id):
         ("connector:" + connector_id).encode("utf-8")).hexdigest()[:16]
 
 
+# ------------------------------------------------------------------
+# Third-party channel inbound (Phase 5, WS1). Same runtime shape
+# as connectors above — poll on the same cycle, llm tasks, the
+# SAME pending-reply file — with two differences: the conversation
+# is per (channel, chat) so two owners on one bot do not share a
+# transcript, and replies are addressed back to the originating
+# chat via channellib. Allowlist filtering happens inside
+# channellib before any event reaches this function, so a task is
+# only ever created for an allowlisted sender.
+# ------------------------------------------------------------------
+
+def _channel_session(channel_id, chat_id):
+    import hashlib
+    return hashlib.sha256(
+        ("channel:" + channel_id + ":" + str(chat_id)).encode(
+            "utf-8")).hexdigest()[:16]
+
+
+def _poll_channels():
+    import channellib
+    pending = _load_pending()
+    changed = False
+    for entry in channellib.list_channels():
+        channel_id = entry["id"]
+        result = channellib.poll_channel(entry)
+        if not result.get("ok"):
+            log(f"channel {channel_id} poll error: "
+                f"{result.get('error')}")
+            continue
+        for event in result.get("events", []):
+            task = agentlib.new_task(
+                f"channel {channel_id}", event["text"], [])
+            task["kind"] = "llm"
+            task["conv_session"] = _channel_session(
+                channel_id, event["chat"])
+            agentlib.save_task(task)
+            pending[task["id"]] = {"channel": channel_id,
+                                   "chat": event["chat"]}
+            changed = True
+            agentlib.log_event(
+                "system",
+                f"channel {channel_id} inbound -> task {task['id']}",
+                session=task["session"])
+    if changed:
+        _save_pending(pending)
+
+
 def _poll_connectors():
     import connectorlib
     pending = _load_pending()
@@ -714,8 +803,38 @@ def _poll_connectors():
         _save_pending(pending)
 
 
-def _flush_pending_replies():
+def _deliver_reply(info, reply):
+    """Send one finished task's reply back via its origin route.
+
+    info is the pending-map value: {"connector": id} (Phase 4) or
+    {"channel": id, "chat": chat_id} (Phase 5). Returns nothing;
+    failures are logged, never retried silently forever — the
+    pending entry is dropped by the caller either way.
+    """
+    if info.get("channel"):
+        import channellib
+        channel_id = info["channel"]
+        try:
+            outcome = channellib.send_message(
+                channel_id, info.get("chat", ""), reply)
+            if not outcome.get("ok"):
+                log(f"channel {channel_id} reply failed: "
+                    f"{outcome.get('error')}")
+        except Exception as exc:  # noqa: BLE001 - delivery is additive
+            log(f"channel reply error: {exc}")
+        return
     import connectorlib
+    connector_id = info.get("connector", "")
+    try:
+        outcome = connectorlib.send_message(connector_id, reply)
+        if not outcome.get("ok"):
+            log(f"connector {connector_id} reply failed: "
+                f"{outcome.get('error')}")
+    except ValueError as exc:
+        log(f"connector reply error: {exc}")
+
+
+def _flush_pending_replies():
     pending = _load_pending()
     if not pending:
         return
@@ -731,22 +850,15 @@ def _flush_pending_replies():
             continue
         info = pending.pop(task_id)
         changed = True
-        connector_id = info.get("connector", "")
         reply = ""
         if task.get("status") == "done":
             reply = str((task.get("result") or {}).get("reply") or "")
         if reply:
-            try:
-                outcome = connectorlib.send_message(connector_id, reply)
-                if not outcome.get("ok"):
-                    log(f"connector {connector_id} reply failed: "
-                        f"{outcome.get('error')}")
-            except ValueError as exc:
-                log(f"connector reply error: {exc}")
+            _deliver_reply(info, reply)
         else:
             agentlib.log_event(
                 "system",
-                f"connector task {task_id} finished without a reply; "
+                f"inbound task {task_id} finished without a reply; "
                 "nothing sent (no fabricated text)",
                 session=task.get("session", ""))
     if changed:
@@ -794,6 +906,7 @@ def serve_forever():
                 if poll_cycle >= CONNECTOR_POLL_EVERY_CYCLES:
                     poll_cycle = 0
                     _poll_connectors()
+                    _poll_channels()
             except Exception as exc:  # noqa: BLE001 - inbound is additive
                 log(f"connector inbound error (continuing): {exc}")
             if len(in_flight) < MAX_PARALLEL:
