@@ -20,7 +20,7 @@ reason — user-visible, never silent).
 | # | Capability | Reference (path:line) | DclawOS at Phase 3 end | Phase 4 plan | State |
 |---|---|---|---|---|---|
 | A1 | Provider call path (OpenAI-compatible) | OmniRoute `open-sse/executors/default.ts` (`DefaultExecutor.execute`: URL normalise → auth header → fetch → usage extraction); OpenClaw `packages/ai/src/providers/openai-completions.ts` | Absent: `dclawos-route` decides, nothing calls | New engine entry `dclawos/llm.ts`: registry baseUrl resolution + fetch executor behind the dispatch pipeline; key arrives via stdin from the agent service (0600 secret files), never argv/log/repo | CLOSED (P4-M1, run 41052993207 #33 success) |
-| A2 | Anthropic Messages path | OmniRoute translator pair `open-sse/translator/request/openai-to-claude.ts` + `response/claude-to-openai.ts`; executors `claude.ts`, `anthropicOAuth.ts` | Absent | Copy the translator pair (MIT) into engine-src; executor branch for `anthropic` (x-api-key, anthropic-version) using the copied translators | WIP (P4-M1: adapted conversion in llmClaude.ts, locally mock-verified; verbatim translator copy remains the completion step) |
+| A2 | Anthropic Messages path | OmniRoute translator pair `open-sse/translator/request/openai-to-claude.ts` + `response/claude-to-openai.ts`; executors `claude.ts`, `anthropicOAuth.ts` | Absent | Copy the translator pair (MIT) into engine-src; executor branch for `anthropic` (x-api-key, anthropic-version) using the copied translators | IMPLEMENTED-ADAPTED (P4-M1, run #33; verbatim translator copy BLOCKED — evidence in section F; the adapted llmClaude.ts implements the same conversion contract and is mock-gated) |
 | A3 | Dispatch pipeline is real (not skeleton) | OmniRoute `open-sse/services/combo.ts` (target expansion/prelude/attempt loop), `handlers/chatCore.ts` (3,416 lines; non-streaming slice ~8 files) | `dclawos/dispatch.ts` skeleton: stages 1–5 real scoring/order/retry, stage 6 is a caller callback | Wire stage 6 to the real executors (A1/A2); account-fallback classification (B1) feeds durable/transient decisions; nested-combo expansion (`resolveComboTargets`) ported for combo targets | CLOSED for stage-6 wiring (P4-M1, run #33); B1/B5 hooks land in P4-M3 |
 | A4 | Agent loop (LLM → tool call → approval → execute → feed back → continue) | OpenClaw `packages/agent-core/src/agent-loop.ts:92,248,497` (`runAgentLoop`, tool-batch execution); approval seam `src/agents/agent-tools.before-tool-call.approval.ts:495,517` | Absent: daemon executes pre-written `steps[]`; results never fed back | Loop in `dclawos-agent` for chat/llm tasks: model tool_calls → existing `execute_step` (tier classify + ticket approval, unchanged) → tool-result messages appended → re-call; stop on final answer / max turns / stop flag / budget | CLOSED (P4-M2, run #34 green) |
 | A5 | Model-facing tool schemas | OpenClaw `src/agents/agent-tools.ts:184,254,677` (runtime tool construction), `core-coding-tools.ts:204` | Absent: 13 fixed dispatch tools, no schemas | `toolslib` schema table (name/description/JSON-Schema) for every dispatch tool, serialised into the request `tools[]`; schemas and dispatch table kept in one place | CLOSED (P4-M2, run #34 green) |
@@ -35,7 +35,7 @@ reason — user-visible, never silent).
 | B2 | routing/quality.ts + storage backend | OmniRoute `open-sse/services/routing/quality.ts` (327 lines; :124 recordQualityEvent, :235 getProviderQuality, :281 getQualityScore — in-memory EWMA, no persistence upstream) | `quality` factor exists in scoring (weight 0.03) but is caller-supplied only | Copy quality.ts verbatim; ADD the persistence upstream lacks: file-state backend (same store pattern) so EWMA state survives restarts; executor records events per real call; decision path loads persisted quality into telemetry | CLOSED (P4-M4, run #37 green after gate-side fix in 6f64a55) |
 | B3 | chaosEngine | OmniRoute `open-sse/services/autoCombo/chaosEngine.ts` (674 lines; :215 runChaosPanel, :434 handleChaosChat, :631 dispatchChaosFromCombo) + its test file | Absent (named as gap in Phase 3) | Copy chaosEngine.ts + its closure + upstream test adapted as a bundle selftest (deterministic parts); wire `dispatchChaosFromCombo` behind an explicit settings/env opt-in (default OFF — chaos injects faults, never on by default) | CLOSED (P4-M4, run #37 green after gate-side fix in 6f64a55) |
 | B4 | cost_envelope traced + implemented | Emission traced: gateway computes per-request cost via `src/lib/usage/costCalculator.ts:325,361` (`calculateCostDetailed`/`calculateCost`) called from `handlers/chatCore/streamingCost.ts` / non-streaming usage stats; the response `cost` is then surfaced as `cost_envelope {estimated, actual, currency:"USD"}` by `src/lib/a2a/skills/smartRouting.ts:36,82` | `costUsd` null; no envelope anywhere | Executor computes cost from REAL response usage × registry pricing (`providerCostData.getModelPricing`, the vendored local pricing source — documented equivalent of calculateCost's DB pricing lookup) and emits `cost_envelope` on every executed request; no response ⇒ no envelope, cost stays null | CLOSED (P4-M1, run #33; mock-verified in hook 1003 selftest) |
-| B5 | combo target expansion | OmniRoute `open-sse/services/combo.ts` (`resolveComboTargets`, `resolveNestedComboTargets`, cycle guard) | dispatch stage 1 passes the ordered list through | Port expansion + cycle guard into the dispatch path used by llm.ts (JSON combo definitions from the settings registry, as with taskFitness' JSON adaptation) | WIP (combo definition resolution lives in the registry/settings layer; llm.ts consumes ranked targets — see B5 note in P4-M3 commit) |
+| B5 | combo target expansion | OmniRoute `open-sse/services/combo.ts` (`resolveComboTargets`, `resolveNestedComboTargets`, cycle guard) | dispatch stage 1 passes the ordered list through | Port expansion + cycle guard into the dispatch path used by llm.ts (JSON combo definitions from the settings registry, as with taskFitness' JSON adaptation) | CLOSED-BOUNDARY (see section F: expansion operates on gateway-DB combo definitions, which have no local data source; combo cooldown/retry code copied in P4-M3; ranked-target consumption is the local equivalent) |
 
 ## C. OpenClaw core completeness
 
@@ -44,7 +44,7 @@ reason — user-visible, never silent).
 | C1 | Subagent runtime (own session/model, result delivery) | OpenClaw `src/agents/tools/sessions-spawn-tool.ts` (711 lines), `sessions-send-tool.ts`, `subagents-tool.ts` (457) | Partial: sequential child tasks, blocking poll, no own session | Child = own conversation (A6) + own loop run (A4) + optional model pin; parent receives final assistant text; daemon runs tasks concurrently (bounded pool) so a waiting parent no longer blocks the queue; depth limit enforced | CLOSED (P4-M5, run #38 green) |
 | C2 | Scheduling / cron | OpenClaw `src/cron/service.ts` (façade), `store.ts:485`, agent `cron` tool family | Absent | Job store (registrylib patterns) + daemon timer firing loop/step tasks + `cron` tool in the loop + CLI management; delivery = event log + optional connector_send | CLOSED (P4-M6, run #39 green) |
 | C3 | Memory + context assembly + compaction | OpenClaw `packages/agent-core/src/harness/compaction/compaction.ts` (730), `src/context-engine/types.ts:37` | Absent | Context assembly v1 (system prompt + transcript window); compaction: when a transcript exceeds the turn/token budget, older turns are summarised by the loop's own model call into a `compaction` transcript entry (OpenClaw entry shape); file memory store + `memory_save`/`memory_search` tools (plain-text search; no vector backend — see exclusions) | CLOSED (P4-M7, run #40 green) |
-| C4 | Connector inbound runtime | OpenClaw `src/channels/` contract (inbound normalisation → agent run → outbound send), 45k LOC core | Partial: outbound one-shot send, one local adapter | Inbound: daemon polls enabled connectors that implement `poll` (same stdin/stdout JSON contract, extended); inbound events create loop tasks on a per-connector session and replies go back via `send`; local adapter implements poll over its inbox file | WIP (P4-M8: connector poll contract + daemon inbound runtime + reply routing; closing on green run, final audit follows) |
+| C4 | Connector inbound runtime | OpenClaw `src/channels/` contract (inbound normalisation → agent run → outbound send), 45k LOC core | Partial: outbound one-shot send, one local adapter | Inbound: daemon polls enabled connectors that implement `poll` (same stdin/stdout JSON contract, extended); inbound events create loop tasks on a per-connector session and replies go back via `send`; local adapter implements poll over its inbox file | CLOSED (P4-M8, run #41 green) |
 | C5 | Extra core tools (edit, process, web_fetch) | OpenClaw `core-coding-tools.ts:204` (`edit`/`apply_patch`, background `process`), `tools/web-fetch.ts` | Absent (full-file write + one-shot shell only) | Add `edit_file` (exact-match replace), `process` (background shell with poll/log/kill over the task store), `web_fetch` (HTTP GET → text, size-capped) with classify() tiers | CLOSED (P4-M5, run #38 green) |
 
 ## D. Explicit exclusions (non-core; user-visible, with reasons)
@@ -103,3 +103,87 @@ local mock OpenAI-compatible endpoint inside the build/gate
 environment (loop, tool-call round trip, routing decision, cost from
 mock usage fields). Real-provider verification happens on-device
 after the user enters a key in the Settings GUI.
+
+## F. Closing audit (2026-10-30, all runs API-verified)
+
+Build ledger (module / commit / run / result):
+
+| Module | Commit | Run | Result |
+|---|---|---|---|
+| Gap inventory | 8cd1aee | 41050985437 (#32) | success |
+| P4-M1 provider path + dispatch + cost_envelope | c78a914 | 41052993207 (#33) | success |
+| P4-M2 agent loop + schemas + transcripts + chat | 4ba687b | 41055158992 (#34) | success |
+| P4-M3 accountFallback full transplant | 3db6ab8 | 41057506320 (#35) | success |
+| P4-M4 quality + chaos | 1282332 | 41059890583 (#36) | FAILURE (gate bug, see below) |
+| P4-M4 gate fix | 6f64a55 | 41060663356 (#37) | success |
+| P4-M5 subagent runtime + extra tools | 88a7cdb | 41062906489 (#38) | success |
+| P4-M6 cron | 46e101c | 41065550999 (#39) | success |
+| P4-M7 memory + compaction | 2ccbe2c | 41067920235 (#40) | success |
+| P4-M8 connector inbound | 912d607 | 41070729643 (#41) | success |
+
+Run #36 failure, for the record: hook 1003's --selftest-quality
+read `${DCLAWOS_STATE_DIR}/provider-quality.json` with the env
+var unset in the build chroot (path became
+"undefined/provider-quality.json"). The product code was
+correct (qualityStore.stateDir falls back to the default state
+directory and had persisted there). Gate-side fix only,
+assertions unchanged; re-verified locally with the env unset
+and by run #37.
+
+Row-by-row closing state: A1 CLOSED, A2 IMPLEMENTED-ADAPTED
+(blocker below), A3 CLOSED, A4 CLOSED, A5 CLOSED, A6 CLOSED,
+A7 CLOSED (mock-verified; real-provider replies verified
+on-device after key entry), B1 CLOSED, B2 CLOSED, B3 CLOSED,
+B4 CLOSED, B5 CLOSED-BOUNDARY (below), C1 CLOSED, C2 CLOSED,
+C3 CLOSED, C4 CLOSED, C5 CLOSED. Section D exclusions stand
+as written (third-party channel plugins, gateway server,
+companion apps, media generation suites, hosted
+browser/computer-use, vector memory backends, ~60 provider
+brand extensions and local-inference runtimes, ACP bridges,
+plugin marketplace / Postgres / multi-agent roster, and the
+OmniRoute web/OAuth executor zoo).
+
+A2 named blocker (verbatim translator pair): the closure of
+open-sse/translator/request/openai-to-claude.ts +
+response/claude-to-openai.ts was copied into a scratch tree
+and bundle-tested. It transitively requires (a) the gateway
+database core — chain: openai-to-claude.ts ->
+request/openai-to-claude/thinkingBudget.ts ->
+src/lib/modelCapabilities.ts -> src/lib/modelsDevSync.ts ->
+src/lib/db/core.ts (getDbInstance) plus db backup/readCache
+chains; and (b) streaming-gateway machinery —
+claude-to-openai.ts -> utils/thinkTagParser.ts ->
+handlers/responseSanitizer/* + utils/streamHelpers.ts (SSE
+reconstruction), and services/claudeThinkingStore.ts
+(cross-request thinking-block session state). Neither exists
+in, nor fits, the deliberately non-streaming local executor
+whose only DB surface is the file-state adapter. The adapted
+llmClaude.ts (system promotion, tool_use/tool_result pairing,
+usage-field mapping, cost from registry pricing) implements
+the same conversion contract and is exercised by the hook
+1003 mock gate on every build.
+
+B5 boundary, stated plainly: upstream resolveComboTargets /
+resolveNestedComboTargets expand combo DEFINITIONS stored in
+the gateway DB (nested combos referencing combos, with a
+cycle guard). DclawOS has no combo-definition database:
+combos here are decision-layer strategies (autoCombo scoring
++ mode packs, P3/P4-M1) whose output is already the ranked
+target list llm.ts consumes. There is no local data source
+for the expansion to act on, so there is nothing further to
+wire; the adjacent combo cooldown/retry implementation
+(comboCooldownRetry.ts) WAS copied verbatim in P4-M3.
+
+Honest boundaries that remain (not gap rows, stated so nobody
+over-reads this audit):
+- All LLM behaviour is verified against local mock endpoints
+  in CI. Real-provider verification happens on-device after
+  the user enters a key in the Settings GUI (the standing
+  rule; no keys exist in CI and none were invented).
+- The executor is non-streaming by design; token-by-token
+  streaming to the chat window is not implemented.
+- GTK surfaces (chat window rendering of loop replies) are
+  exercised logically via the daemon gates, not visually in
+  a headless build VM.
+- The Calamares install path (Phase 3 M5) remains
+  code-complete but install-unverified, unchanged by Phase 4.
