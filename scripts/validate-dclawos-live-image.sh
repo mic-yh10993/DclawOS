@@ -243,7 +243,9 @@ grep -q 'dclawos-chat' "$WORK/menu-extract/etc/xdg/openbox/menu.xml" || {
     echo "desktop menu does not summon the chat window" >&2
     exit 1
 }
-unsquashfs -d "$WORK/settings-extract" "$FS" usr/local/bin/dclawos-settings >/dev/null 2>&1
+# (settings already extracted to $WORK/settings-extract by the
+# Phase 2 block above; re-extracting to the same directory fails
+# because unsquashfs refuses to overwrite existing files. Reuse it.)
 grep -q 'connectors' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
     echo "settings lacks connectors management" >&2
     exit 1
