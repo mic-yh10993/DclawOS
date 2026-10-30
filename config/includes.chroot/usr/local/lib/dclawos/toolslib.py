@@ -102,6 +102,13 @@ TOOL_SCHEMAS = [
             "credentials.",
             {"kind": _STR, "message": _STR, "app_hint": _STR},
             ("message",)),
+    _schema("memory_save",
+            "Save a fact or preference to long-term memory so "
+            "future sessions can recall it.",
+            {"text": _STR, "tag": _STR}, ("text",)),
+    _schema("memory_search",
+            "Search long-term memory entries by substring.",
+            {"query": _STR}, ("query",)),
     _schema("cron",
             "Manage scheduled agent jobs: action add (schedule + "
             "goal), list or remove (job_id). Schedule is "

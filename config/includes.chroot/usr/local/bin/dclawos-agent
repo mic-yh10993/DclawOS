@@ -349,6 +349,13 @@ def execute_step(task, step):
         return _subagent(params, task)
     if tool == "cron":
         return _cron(params)
+    if tool == "memory_save":
+        import memorylib
+        return memorylib.save(params.get("text", ""),
+                              params.get("tag") or "note")
+    if tool == "memory_search":
+        import memorylib
+        return memorylib.search(params.get("query", ""))
     if tool == "takeover_request":
         return _takeover_request(params)
     raise ValueError(f"unknown tool: {tool!r}")
@@ -394,6 +401,61 @@ def _message_text(message):
     return content if isinstance(content, str) else ""
 
 
+COMPACT_AFTER_MESSAGES = 40
+
+
+def _maybe_compact(conv_session):
+    """Summarize an over-long transcript into a compaction entry
+    (gap row C3). OpenClaw's compaction replaces covered history
+    with an LLM-written summary; convlib.project_messages already
+    projects that shape. Failure to summarize is non-fatal: the
+    loop proceeds with the full transcript."""
+    import convlib
+    import llmlib
+    entries = convlib.load_entries(conv_session)
+    last_compaction = -1
+    for index, entry in enumerate(entries):
+        if entry.get("kind") == "compaction":
+            last_compaction = index
+    pending = [e for e in entries[last_compaction + 1:]
+               if e.get("kind") == "message"]
+    if len(pending) <= COMPACT_AFTER_MESSAGES:
+        return
+    history = [e["message"] for e in pending
+               if isinstance(e.get("message"), dict)]
+    prompt = history + [{
+        "role": "user",
+        "content": "Summarize the conversation above into a "
+                   "compact brief that preserves facts, decisions, "
+                   "names, paths and open threads. Be specific; "
+                   "this summary replaces the original messages.",
+    }]
+    try:
+        result = llmlib.call(prompt, tools=None)
+    except Exception as exc:  # noqa: BLE001 - compaction is optional
+        agentlib.log_event("system",
+                           f"compaction skipped: {exc}",
+                           session=conv_session)
+        return
+    response = result.get("response") or {}
+    choices = response.get("choices") or []
+    summary = ""
+    if choices:
+        summary = str((choices[0].get("message") or {}).get(
+            "content") or "")
+    if not summary:
+        return
+    convlib.append_entry(conv_session, {
+        "kind": "compaction",
+        "summary": summary[:8000],
+        "covers": len(pending),
+    })
+    agentlib.log_event(
+        "system",
+        f"compacted {len(pending)} messages into a summary",
+        session=conv_session)
+
+
 def run_llm_task(task):
     """The agent loop (gap rows A4/A6/A7). Returns the task dict."""
     import convlib
@@ -427,6 +489,7 @@ def run_llm_task(task):
                 task["error"] = "stopped by human"
                 agentlib.save_task(task)
                 return task
+            _maybe_compact(conv_session)
             messages = convlib.project_messages(conv_session,
                                                 SYSTEM_PROMPT)
             result = llmlib.call(

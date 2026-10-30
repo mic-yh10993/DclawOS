@@ -76,6 +76,7 @@ TOOLS = (
     "service_status", "service_restart", "package_install",
     "route_decide", "mcp_call", "skill_run", "subagent",
     "takeover_request", "connector_send", "cron",
+    "memory_save", "memory_search",
 )
 
 
@@ -305,6 +306,10 @@ def classify(tool, params):
         return 1, "third-party tool execution"
     if tool == "subagent":
         return 1, "child session execution"
+    if tool == "memory_search":
+        return 0, "memory search is read-only"
+    if tool == "memory_save":
+        return 1, "memory writes persist across sessions"
     if tool == "cron":
         if params.get("action") == "list":
             return 0, "listing scheduled jobs is read-only"

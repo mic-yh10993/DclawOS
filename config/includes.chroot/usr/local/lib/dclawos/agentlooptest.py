@@ -194,6 +194,47 @@ def main():
         fail("cron job fired twice for one interval")
     if not cronlib.remove_job(job["id"]):
         fail("cron remove_job failed")
+    # --- Phase 4 module 7 gate: memory + compaction ------------
+    import memorylib
+    mem_tmp = tempfile.mkdtemp(prefix="dclawos-memory-test-")
+    os.environ["DCLAWOS_MEMORY_DIR"] = mem_tmp
+    memorylib.save("the gate prefers tea", tag="preference")
+    hits = memorylib.search("TEA")
+    if hits.get("count") != 1:
+        fail(f"memory search failed: {hits}")
+    # Compaction: stub the model call, overflow a transcript, and
+    # require a compaction entry that project_messages surfaces.
+    import importlib.machinery
+    import llmlib
+    real_call = llmlib.call
+    llmlib.call = lambda messages, tools=None, **kw: {
+        "response": {"choices": [{"message": {
+            "role": "assistant",
+            "content": "gate summary of prior turns"}}]},
+        "costUsd": None}
+    try:
+        loader = importlib.machinery.SourceFileLoader(
+            "dclawos_agent_mod", "/usr/local/bin/dclawos-agent")
+        import importlib.util
+        spec = importlib.util.spec_from_loader(
+            "dclawos_agent_mod", loader)
+        agent_mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(agent_mod)
+        sess = "0123456789abcdef"
+        convlib.ensure_session(sess, title="compaction gate")
+        for i in range(45):
+            convlib.append_message(
+                sess, {"role": "user", "content": f"msg {i}"})
+        agent_mod._maybe_compact(sess)
+    finally:
+        llmlib.call = real_call
+    entries = convlib.load_entries(sess)
+    if not any(e.get("kind") == "compaction" for e in entries):
+        fail("compaction produced no compaction entry")
+    projected = convlib.project_messages(sess, "sys")
+    if not any("gate summary" in str(m.get("content", ""))
+               for m in projected):
+        fail("projected messages do not surface the summary")
     server.shutdown()
     print("agentlooptest OK: tool-call round trip, transcript, cost "
           "accounting and honest model-less path verified against "
