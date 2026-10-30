@@ -110,7 +110,8 @@ palette alignment).
 | P5-M0 ledger + UI-RULES docs | 25bffbf | 41090974570 (#43) | success |
 | P5-M1..M3 WS1 channels (framework, Telegram, Discord, Slack, Matrix) | e799669 | 41093929086 (#44) | success |
 | P5-M4 WS2 self-provisioning (provisioninglib, HTTP MCP, audit fixes) | 4124af3 + 1cf752d (fix) | 41097319110 (#46) | success — #45 (41096427145) failed at the gate: provisiontest hit Python 3.12-only tarfile filter= on bookworm's 3.11; product fixed with a portable hand-rolled safe extraction (1cf752d), hostile-archive case re-verified |
-| P5-M5 WS3 UI craft (theme system, dark variant, per-app application) | (this commit) | — | pending |
+| P5-M5 WS3 UI craft (theme system, dark variant, per-app application) | 54504a0 | 41099855681 (#47) | success (release dclawos-2.0-preview-47, ISO 1,060,050,944 B) |
+| P5-M6 close-out (ledger finalisation, this note) | (this commit) | — | pending |
 
 ## Unverified / honesty boundary
 
@@ -120,3 +121,19 @@ palette alignment).
 - GTK visual quality cannot be screenshot-verified in the
   headless build VM; WS3 is verified by gate token assertions +
   code-level application, and needs an on-device visual pass.
+
+## Phase 5 close-out (P5-M6)
+
+All three workstreams are landed and build-verified: WS1 four
+adapters CLOSED with three channels BLOCKED-NAMED and two
+EVALUATED-FEASIBLE-deferred (W1.6); WS2 six tools CLOSED with
+settings_set BLOCKED-NAMED (needs a config-channel decision:
+broker set-setting op vs shared config file — a product call,
+not an implementation gap) and the human-only set recorded at
+W2.0; WS3 all ten rules LANDED or CODE with per-rule deviations
+in docs/UI-RULES.md. Unchanged unverified layers from earlier
+phases: Calamares install success, real-provider LLM replies
+(need the user's keys in Settings), on-device GTK visual pass.
+The M4 row carries the phase's one red build (#45) — the gate
+caught a real Python-version portability bug in product code;
+the fix is the module's second commit.
