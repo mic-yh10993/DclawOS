@@ -257,7 +257,32 @@ async function main() {
     await selftestFallback();
     return;
   }
-  if (process.argv.includes("--selftest")) {
+  if (process.argv.includes("--selftest-quality")) {
+  (async () => {
+    const L = require(process.env.DCLAWOS_LLM_BUNDLE || "/usr/share/dclawos/engine/llm.js");
+    const assert = (cond, msg) => { if (!cond) { console.error("quality selftest FAIL:", msg); process.exit(1); } };
+    // Module 4 gate (gap rows B2/B3): upstream EWMA quality math
+    // over the DclawOS persistence backend + chaos default-off.
+    for (let i = 0; i < 5; i += 1) L.recordQuality("gateprov", "gatemodel", true, 200, 100);
+    let q = L.qualityOf("gateprov", "gatemodel");
+    assert(q.samples === 5 && q.successEwma === 1, `quality after successes: ${JSON.stringify(q)}`);
+    const fs = require("node:fs");
+    const persisted = JSON.parse(fs.readFileSync(
+      `${process.env.DCLAWOS_STATE_DIR}/provider-quality.json`, "utf8"));
+    assert(persisted["gateprov::gatemodel"] && persisted["gateprov::gatemodel"].samples === 5,
+      "quality samples persisted to the file-state store");
+    for (let i = 0; i < 5; i += 1) L.recordQuality("gateprov", "gatemodel", false, 500, 900);
+    q = L.qualityOf("gateprov", "gatemodel");
+    assert(q.successEwma < 0.4, `EWMA must decay after failures: ${q.successEwma}`);
+    assert(typeof q.classification === "string" && q.classification.length > 0,
+      "classifyQuality returns a classification");
+    assert(L.chaosEnabled() === false, "chaos must be OFF by default");
+    assert(typeof L.dispatchChaosFromCombo === "function",
+      "chaosEngine dispatch surface present in the bundle");
+    console.log("dclawos-llm quality selftest OK");
+    process.exit(0);
+  })().catch((e) => { console.error("quality selftest error:", e); process.exit(1); });
+} else if (process.argv.includes("--selftest")) {
     await selftest();
     return;
   }

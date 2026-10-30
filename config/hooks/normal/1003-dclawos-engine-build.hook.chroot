@@ -112,6 +112,9 @@ python3 -m json.tool "$ENGINE_OUT/catalog.json" > /dev/null || {
 # AccountFallback gate (Phase 4 module 3): lockout lifecycle,
 # classification signals, file-state adapter persistence.
 /usr/local/bin/dclawos-llm --selftest-fallback
+# Quality + chaos gate (Phase 4 module 4): EWMA quality math,
+# file-state persistence, chaos OFF by default.
+/usr/local/bin/dclawos-llm --selftest-quality
 
 # 5. Cleanup (keep /opt/dclawos-node runtime + engine outputs + source).
 cd /

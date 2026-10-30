@@ -195,7 +195,9 @@ async function executeTarget(
       body: { error: "model locked by accountFallback (cooldown)" },
     };
   }
+  const startedAt = Date.now();
   const outcome = await executeTargetInner(request, target, signal);
+  recordQuality(target.provider, target.model, outcome.ok, outcome.status, Date.now() - startedAt);
   if (outcome.ok) {
     recordProviderSuccess(target.provider, connId);
   } else {
@@ -375,3 +377,12 @@ export {
   setConnectionRateLimitUntil,
   getConnectionRateLimitUntil,
 } from "../open-sse/services/dbAdapter";
+// Re-exported for the dclawos-llm --selftest-quality gate
+// (module 4): persisted provider quality + the chaos gate.
+export {
+  recordQuality,
+  qualityOf,
+  chaosEnabled,
+  dispatchChaosFromCombo,
+} from "./qualityStore";
+import { recordQuality } from "./qualityStore";

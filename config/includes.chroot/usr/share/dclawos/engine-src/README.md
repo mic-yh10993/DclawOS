@@ -221,3 +221,16 @@ Compiled at image build time (NOT a prebuilt blob) by hook
   an attempt (locked = durable 429, no network call) and records
   provider failures/successes + model lockout failures into
   accountFallback. Gate: dclawos-llm --selftest-fallback.
+
+## Phase 4 module 4 additions (quality + chaos)
+
+- Copied verbatim (MIT): open-sse/services/routing/quality.ts,
+  open-sse/services/autoCombo/chaosEngine.ts.
+- dclawos/qualityStore.ts (new, DclawOS): persistence backend
+  for the in-memory upstream quality tracker — snapshots to the
+  file-state store via getQualitySnapshot, restored by bounded
+  replay; recordQuality() is called by the llm.ts executor for
+  every attempt (success / rate_limited / error outcomes);
+  chaosEnabled() gates chaos dispatch behind the
+  chaos-enabled settings flag or DCLAWOS_CHAOS=1 (default OFF).
+- Gate: dclawos-llm --selftest-quality in hook 1003.
