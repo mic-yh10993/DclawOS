@@ -174,6 +174,26 @@ def main():
             result2.get("reply"):
         fail(f"model-less path not honest: {done2.get('status')} "
              f"{result2}")
+    # --- Phase 4 module 6 gate: cron scheduling ----------------
+    import cronlib
+    cron_tmp = tempfile.mkdtemp(prefix="dclawos-cron-test-")
+    os.environ["DCLAWOS_CRON_JOBS"] = os.path.join(cron_tmp,
+                                                   "jobs.json")
+    import time as _time
+    fri = _time.strptime("2026-10-30 09:30", "%Y-%m-%d %H:%M")
+    if not cronlib.cron_matches("30 9 * * 5", fri):
+        fail("cron matcher: weekday match failed")
+    if cronlib.cron_matches("30 9 * * 1", fri):
+        fail("cron matcher: weekday mismatch accepted")
+    job = cronlib.add_job("every 30", "gate check")
+    before = len(agentlib.list_tasks())
+    created = cronlib.fire_due(int(_time.time()) + 60)
+    if len(created) != 1 or len(agentlib.list_tasks()) != before + 1:
+        fail(f"cron fire_due created {created}, expected one task")
+    if cronlib.fire_due(int(_time.time()) + 60):
+        fail("cron job fired twice for one interval")
+    if not cronlib.remove_job(job["id"]):
+        fail("cron remove_job failed")
     server.shutdown()
     print("agentlooptest OK: tool-call round trip, transcript, cost "
           "accounting and honest model-less path verified against "

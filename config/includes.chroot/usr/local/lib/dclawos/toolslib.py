@@ -102,6 +102,14 @@ TOOL_SCHEMAS = [
             "credentials.",
             {"kind": _STR, "message": _STR, "app_hint": _STR},
             ("message",)),
+    _schema("cron",
+            "Manage scheduled agent jobs: action add (schedule + "
+            "goal), list or remove (job_id). Schedule is "
+            "'every <seconds>' or a 5-field cron expression.",
+            {"action": {"type": "string",
+                        "enum": ["add", "list", "remove"]},
+             "schedule": _STR, "goal": _STR, "job_id": _STR},
+            ("action",)),
     _schema("connector_send",
             "Send a message through a configured connector.",
             {"connector": _STR, "message": _STR},

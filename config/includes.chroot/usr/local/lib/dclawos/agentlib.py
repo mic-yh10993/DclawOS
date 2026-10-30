@@ -75,7 +75,7 @@ TOOLS = (
     "process", "web_fetch",
     "service_status", "service_restart", "package_install",
     "route_decide", "mcp_call", "skill_run", "subagent",
-    "takeover_request", "connector_send",
+    "takeover_request", "connector_send", "cron",
 )
 
 
@@ -305,6 +305,10 @@ def classify(tool, params):
         return 1, "third-party tool execution"
     if tool == "subagent":
         return 1, "child session execution"
+    if tool == "cron":
+        if params.get("action") == "list":
+            return 0, "listing scheduled jobs is read-only"
+        return 1, "changing scheduled jobs mutates state"
     if tool == "takeover_request":
         return 0, "request only; the human act itself is out of band"
     return 2, f"unknown tool: {tool!r}"

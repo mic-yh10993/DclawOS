@@ -347,9 +347,32 @@ def execute_step(task, step):
             params.get("connector", ""), params.get("message", ""))
     if tool == "subagent":
         return _subagent(params, task)
+    if tool == "cron":
+        return _cron(params)
     if tool == "takeover_request":
         return _takeover_request(params)
     raise ValueError(f"unknown tool: {tool!r}")
+
+
+def _cron(params):
+    import cronlib
+    action = params.get("action")
+    if action == "list":
+        return {"jobs": cronlib.list_jobs()}
+    if action == "add":
+        schedule = params.get("schedule")
+        goal = params.get("goal")
+        if not isinstance(schedule, str) or not schedule:
+            raise ValueError("cron add needs a 'schedule'")
+        if not isinstance(goal, str) or not goal:
+            raise ValueError("cron add needs a 'goal'")
+        return {"job": cronlib.add_job(schedule, goal)}
+    if action == "remove":
+        job_id = params.get("job_id")
+        if not job_id or not cronlib.remove_job(job_id):
+            raise ValueError(f"unknown cron job: {job_id!r}")
+        return {"removed": job_id}
+    raise ValueError(f"unknown cron action: {action!r}")
 
 
 LLM_MAX_TURNS = 12
@@ -578,6 +601,11 @@ def serve_forever():
     while True:
         try:
             _collect_done()
+            try:
+                import cronlib
+                cronlib.fire_due()
+            except Exception as exc:  # noqa: BLE001 - cron is additive
+                log(f"cron fire error (continuing): {exc}")
             if len(in_flight) < MAX_PARALLEL:
                 task = agentlib.next_queued_task()
                 if task is not None and task["id"] not in in_flight:
