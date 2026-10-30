@@ -85,6 +85,7 @@ class SettingsApp(Gtk.Window):
         stack.add_titled(self.build_ai_panel(), "ai", "AI 与模型")
         stack.add_titled(self.build_skills_panel(), "skills", "Skills 与 MCP")
         stack.add_titled(self.build_secrets_panel(), "secrets", "密钥")
+        stack.add_titled(self.build_channels_panel(), "channels", "渠道")
 
     def labeled_row(self, label_text, widget):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -140,6 +141,24 @@ class SettingsApp(Gtk.Window):
         fa_note.set_line_wrap(True)
         fa_note.set_halign(Gtk.Align.START)
         box.pack_start(fa_note, False, False, 0)
+
+        # Phase 5 module 5: dark UI variant (docs/UI-RULES.md).
+        # theme.py reads this key at app startup; toggling takes
+        # effect the next time each app starts.
+        dark_switch = Gtk.Switch()
+        dark_switch.set_active(self.settings.get_boolean("ui-dark"))
+        dark_switch.connect(
+            "notify::active",
+            lambda sw, _pspec: self.settings.set_boolean(
+                "ui-dark", sw.get_active()))
+        box.pack_start(
+            self.labeled_row("深色界面", dark_switch), False, False, 0)
+        dark_note = Gtk.Label(
+            label="说明：深色调色板按 UI 规范的暗色层级（#0b0b0a 起）"
+                  "呈现，字重整体下调一档防发胖；各应用下次启动时生效。")
+        dark_note.set_line_wrap(True)
+        dark_note.set_halign(Gtk.Align.START)
+        box.pack_start(dark_note, False, False, 0)
         return box
 
     def load_catalog(self):
@@ -293,47 +312,58 @@ class SettingsApp(Gtk.Window):
         self.registry_status.set_halign(Gtk.Align.START)
         box.pack_start(self.registry_status, False, False, 0)
 
+        # Phase 5 module 5 (iron rule 7): each registry group is a
+        # collapsible revealer section — the layout engine animates
+        # the height; no code measures pixels.
         self.skills_store, skills_scroll = self._registry_tree(
             ("名称", "ID", "路径", "启用", "许可证"), (0, 2))
-        skills_label = Gtk.Label(label="Skills")
-        skills_label.set_halign(Gtk.Align.START)
-        box.pack_start(skills_label, False, False, 0)
-        box.pack_start(skills_scroll, True, True, 0)
-        box.pack_start(self._registry_buttons(
+        box.pack_start(self._registry_section(
+            "Skills", skills_scroll,
             (("添加 Skill", self.on_add_skill),
              ("删除 Skill", self.on_remove_skill),
-             ("切换启用", self.on_toggle_skill))),
-            False, False, 0)
+             ("切换启用", self.on_toggle_skill))), True, True, 0)
         self.skills_scroll = skills_scroll
 
         self.servers_store, servers_scroll = self._registry_tree(
             ("名称", "ID", "命令与参数", "启用", "许可证"), (0, 2))
-        servers_label = Gtk.Label(label="MCP 服务器")
-        servers_label.set_halign(Gtk.Align.START)
-        box.pack_start(servers_label, False, False, 0)
-        box.pack_start(servers_scroll, True, True, 0)
-        box.pack_start(self._registry_buttons(
+        box.pack_start(self._registry_section(
+            "MCP 服务器", servers_scroll,
             (("添加 MCP 服务器", self.on_add_server),
              ("删除 MCP 服务器", self.on_remove_server),
-             ("切换启用", self.on_toggle_server))),
-            False, False, 0)
+             ("切换启用", self.on_toggle_server))), True, True, 0)
         self.servers_scroll = servers_scroll
 
         self.connectors_store, connectors_scroll = self._registry_tree(
             ("名称", "ID", "命令与参数", "启用", "许可证"), (0, 2))
-        connectors_label = Gtk.Label(label="连接器")
-        connectors_label.set_halign(Gtk.Align.START)
-        box.pack_start(connectors_label, False, False, 0)
-        box.pack_start(connectors_scroll, True, True, 0)
-        box.pack_start(self._registry_buttons(
+        box.pack_start(self._registry_section(
+            "连接器", connectors_scroll,
             (("添加连接器", self.on_add_connector),
              ("删除连接器", self.on_remove_connector),
-             ("切换启用", self.on_toggle_connector))),
-            False, False, 0)
+             ("切换启用", self.on_toggle_connector))), True, True, 0)
         self.connectors_scroll = connectors_scroll
 
         self.refresh_registry()
         return scrolled
+
+    def _registry_section(self, title, scroll, buttons):
+        """One collapsible registry group (rule 7). Falls back to a
+        plain labelled block when theme.make_section is unavailable."""
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                          spacing=6)
+        content.pack_start(scroll, True, True, 0)
+        content.pack_start(self._registry_buttons(buttons),
+                           False, False, 0)
+        try:
+            import theme
+            return theme.make_section(title, content)
+        except Exception:
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                            spacing=6)
+            label = Gtk.Label(label=title)
+            label.set_halign(Gtk.Align.START)
+            outer.pack_start(label, False, False, 0)
+            outer.pack_start(content, True, True, 0)
+            return outer
 
     def _registry_tree(self, titles, expand_indices):
         store = Gtk.ListStore(str, str, str, str, str)
@@ -546,6 +576,34 @@ class SettingsApp(Gtk.Window):
         box.pack_start(save_btn, False, False, 0)
         return box
 
+    def _store_secret(self, name, value, report):
+        """Broker write-secret flow shared by the secrets page and
+        the channels page (Phase 5). report(text) is called on the
+        GTK thread with the outcome. The broker validates the
+        ticket by params hash, so approval params and execution
+        params must be the identical dict (same as dclawos-secret);
+        the value lives only in memory, the ticket stores a hash."""
+
+        def work():
+            params = {"name": name, "value": value}
+            try:
+                verdict, ticket_id = agentlib.request_approval(
+                    "write-secret", params, f"保存密钥 {name}")
+                if verdict != "approved":
+                    GLib.idle_add(report, f"未保存：审批结果 {verdict}。")
+                    return
+                reply = agentlib.broker_execute(
+                    ticket_id, "write-secret", params)
+                if reply.get("ok"):
+                    GLib.idle_add(report, f"密钥 {name} 已保存。")
+                else:
+                    GLib.idle_add(report,
+                                  f"保存失败：{reply.get('error')}")
+            except Exception as exc:  # noqa: BLE001 - surface to user
+                GLib.idle_add(report, f"保存失败：{exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+
     def on_save_secret(self, _button):
         name = self.secret_name.get_text().strip()
         value = self.secret_value.get_text()
@@ -555,33 +613,238 @@ class SettingsApp(Gtk.Window):
         self.secret_status.set_text("等待审批……")
         self.secret_value.set_text("")
 
-        def work():
-            # The broker validates the ticket by params hash, so the
-            # approval params and the execution params must be the
-            # identical dict (same as dclawos-secret). The value lives
-            # only in this process's memory; the ticket stores a hash.
-            params = {"name": name, "value": value}
-            try:
-                verdict, ticket_id = agentlib.request_approval(
-                    "write-secret", params,
-                    f"保存密钥 {name}")
-                if verdict != "approved":
-                    GLib.idle_add(self.secret_status.set_text,
-                                  f"未保存：审批结果 {verdict}。")
-                    return
-                reply = agentlib.broker_execute(
-                    ticket_id, "write-secret", params)
-                if reply.get("ok"):
-                    GLib.idle_add(self.secret_status.set_text,
-                                  f"密钥 {name} 已保存。")
-                else:
-                    GLib.idle_add(self.secret_status.set_text,
-                                  f"保存失败：{reply.get('error')}")
-            except Exception as exc:  # noqa: BLE001 - surface to the user
-                GLib.idle_add(self.secret_status.set_text,
-                              f"保存失败：{exc}")
+        def report(text):
+            self.secret_status.set_text(text)
+            if "已保存" in text:
+                # Iron rule 10: success feedback extinguishes
+                # itself after 2.5 s (if nothing newer replaced it).
+                def _clear():
+                    if self.secret_status.get_text() == text:
+                        self.secret_status.set_text("")
+                    return False
+                GLib.timeout_add(2500, _clear)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._store_secret(name, value, report)
+
+    # -------------------------------------------------- channels
+
+    CHANNEL_KINDS = ("telegram", "discord", "slack", "matrix")
+
+    def build_channels_panel(self):
+        """Third-party messaging channels (Phase 5, WS1).
+
+        A channel entry lives in the unified registry (kind picks a
+        built-in adapter; no arbitrary commands). The bot token is
+        NOT stored in the registry: it goes through the broker
+        write-secret flow as secret channel-<id>, write-only, the
+        same store as provider keys. The allowlist holds the owner
+        account ids allowed to talk to the agent — anyone else is
+        ignored by the daemon (no task, no reply). Changes here are
+        picked up by the agent service on its next poll cycle; the
+        agent's own channel_manage tool writes the same registry.
+        """
+        scrolled = Gtk.ScrolledWindow()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(12)
+        scrolled.add(box)
+        if registrylib is None or agentlib is None:
+            label = Gtk.Label(label="注册表或 agentlib 不可用，"
+                                    "无法管理渠道。")
+            label.set_line_wrap(True)
+            label.set_halign(Gtk.Align.START)
+            box.pack_start(label, False, False, 0)
+            return scrolled
+        note = Gtk.Label(
+            label="说明：渠道让 agent 通过第三方消息服务（Telegram / "
+                  "Discord / Slack / Matrix 机器人）收发消息。令牌只写"
+                  "不读（保存为密钥 channel-<渠道ID>，需审批）。白名单"
+                  "填你自己的账号 ID（逗号分隔）：只有白名单内的人发来"
+                  "的消息会变成 agent 任务，其余一律忽略；白名单为空 "
+                  "= 谁都不能用。在机器人那里先发一句话，agent 的回复"
+                  "会回到同一会话。类型要点：Discord 需在附加选项填 "
+                  "{\"channel_id\": \"目标频道ID\"}；Slack 还需第二个"
+                  "应用令牌，保存为密钥 channel-<渠道ID>-app（在密钥页"
+                  "添加）；Matrix 需在附加选项填 {\"homeserver\": "
+                  "\"https://你的服务器\"}，且只支持未加密房间。")
+        note.set_line_wrap(True)
+        note.set_halign(Gtk.Align.START)
+        try:
+            import theme
+            theme.apply_prose(note)
+        except Exception:
+            pass
+        box.pack_start(note, False, False, 0)
+        self.channels_status = Gtk.Label(label="")
+        self.channels_status.set_halign(Gtk.Align.START)
+        box.pack_start(self.channels_status, False, False, 0)
+        self.channels_store, channels_scroll = self._registry_tree(
+            ("名称", "ID", "类型", "启用", "白名单"), (0, 4))
+        box.pack_start(channels_scroll, True, True, 0)
+        box.pack_start(self._registry_buttons(
+            (("添加渠道", self.on_add_channel),
+             ("删除渠道", self.on_remove_channel),
+             ("切换启用", self.on_toggle_channel),
+             ("更新令牌/白名单", self.on_edit_channel))),
+            False, False, 0)
+        self.channels_scroll = channels_scroll
+        self.refresh_channels()
+        return scrolled
+
+    def refresh_channels(self):
+        if not hasattr(self, "channels_store"):
+            return
+        try:
+            data, _skipped = registrylib.load_registry()
+        except ValueError as exc:
+            self.channels_status.set_text(f"注册表读取失败：{exc}")
+            self.channels_store.clear()
+            return
+        self.channels_store.clear()
+        for entry in data.get("channels", []):
+            self.channels_store.append((
+                entry.get("name", ""), entry.get("id", ""),
+                entry.get("kind", ""),
+                "是" if entry.get("enabled") else "否",
+                ",".join(entry.get("allowlist", []))))
+        self.channels_status.set_text(
+            f"渠道 {len(data.get('channels', []))} 个")
+
+    def _channel_fields_dialog(self, title, entry=None):
+        """Add/edit channel dialog. Returns (values, token) or
+        (None, "") on cancel. Token is write-only: always starts
+        empty; empty means "leave the stored token unchanged"."""
+        dialog = Gtk.Dialog(title=title, transient_for=self,
+                            flags=Gtk.DialogFlags.MODAL)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("保存", Gtk.ResponseType.OK)
+        area = dialog.get_content_area()
+        area.set_border_width(8)
+        name = self._entry_row(area, "名称：")
+        entry_id = self._entry_row(area, "ID（小写字母/数字/_/-）：")
+        kind_combo = Gtk.ComboBoxText()
+        for kind in self.CHANNEL_KINDS:
+            kind_combo.append(kind, kind)
+        kind_combo.set_active(0)
+        kind_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=6)
+        kind_row.pack_start(Gtk.Label(label="类型："), False, False, 0)
+        kind_row.pack_start(kind_combo, True, True, 0)
+        area.pack_start(kind_row, False, False, 0)
+        allow = self._entry_row(area, "白名单（账号 ID，逗号分隔）：")
+        options = self._entry_row(area, "附加选项（JSON，可留空）：")
+        token = self._entry_row(area, "令牌（只写，可留空）：")
+        token.set_visibility(False)
+        if entry is not None:
+            name.set_text(entry.get("name", ""))
+            entry_id.set_text(entry.get("id", ""))
+            entry_id.set_sensitive(False)
+            if entry.get("kind") in self.CHANNEL_KINDS:
+                kind_combo.set_active_id(entry["kind"])
+            allow.set_text(",".join(entry.get("allowlist", [])))
+            if entry.get("options"):
+                import json as _json
+                options.set_text(_json.dumps(
+                    entry["options"], ensure_ascii=False))
+        dialog.show_all()
+        values = None
+        token_text = ""
+        if dialog.run() == Gtk.ResponseType.OK:
+            import json as _json
+            options_text = options.get_text().strip()
+            options_value = {}
+            if options_text:
+                try:
+                    options_value = _json.loads(options_text)
+                    if not isinstance(options_value, dict):
+                        raise ValueError("附加选项必须是 JSON 对象")
+                except ValueError as exc:
+                    dialog.destroy()
+                    return {"error": f"附加选项 JSON 无效：{exc}"}, ""
+            values = {
+                "id": entry_id.get_text().strip(),
+                "name": name.get_text().strip(),
+                "kind": kind_combo.get_active_id() or "telegram",
+                "allowlist": [part.strip() for part in
+                              allow.get_text().split(",")
+                              if part.strip()],
+                "options": options_value,
+            }
+            token_text = token.get_text().strip()
+        dialog.destroy()
+        return values, token_text
+
+    def on_add_channel(self, _button):
+        values, token = self._channel_fields_dialog("添加渠道")
+        if values is None:
+            return
+        if values.get("error"):
+            self._error(values["error"])
+            return
+        values["secret"] = f"channel-{values['id']}"
+        try:
+            data, _skipped = registrylib.load_registry()
+            registrylib.add_channel(data, values)
+            registrylib.save_registry(data)
+        except ValueError as exc:
+            self._error(f"添加失败：{exc}")
+            return
+        self.refresh_channels()
+        if token:
+            self.channels_status.set_text("渠道已添加，正在保存令牌……")
+            self._store_secret(values["secret"], token,
+                               self.channels_status.set_text)
+
+    def on_remove_channel(self, _button):
+        self._remove_selected("channel",
+                              self.channels_scroll.get_child())
+        self.refresh_channels()
+
+    def on_toggle_channel(self, _button):
+        self._toggle_selected("channel",
+                              self.channels_scroll.get_child())
+        self.refresh_channels()
+
+    def on_edit_channel(self, _button):
+        tree = self.channels_scroll.get_child()
+        entry_id = self._selected_id(tree)
+        if entry_id is None:
+            self._error("请先选择一行")
+            return
+        try:
+            data, _skipped = registrylib.load_registry()
+        except ValueError as exc:
+            self._error(f"读取失败：{exc}")
+            return
+        current = None
+        for entry in data.get("channels", []):
+            if entry.get("id") == entry_id:
+                current = entry
+                break
+        if current is None:
+            self._error(f"找不到渠道 {entry_id!r}")
+            return
+        values, token = self._channel_fields_dialog(
+            "更新令牌/白名单", entry=current)
+        if values is None:
+            return
+        if values.get("error"):
+            self._error(values["error"])
+            return
+        current["name"] = values["name"] or current.get("name", "")
+        current["allowlist"] = values["allowlist"]
+        current["kind"] = values["kind"]
+        current["options"] = values["options"]
+        try:
+            registrylib.save_registry(data)
+        except (OSError, ValueError) as exc:
+            self._error(f"保存失败：{exc}")
+            return
+        self.refresh_channels()
+        if token:
+            self.channels_status.set_text("正在保存令牌……")
+            self._store_secret(
+                current.get("secret") or f"channel-{entry_id}",
+                token, self.channels_status.set_text)
 
     def _remove_selected(self, kind, tree):
         entry_id = self._selected_id(tree)
@@ -589,9 +852,9 @@ class SettingsApp(Gtk.Window):
             self._error("请先选择一行")
             return
         labels = {"skill": "Skill", "server": "MCP 服务器",
-                  "connector": "连接器"}
+                  "connector": "连接器", "channel": "渠道"}
         keys = {"skill": "skills", "server": "mcp_servers",
-                "connector": "connectors"}
+                "connector": "connectors", "channel": "channels"}
         label = labels.get(kind, kind)
         if not self._confirm(f"确定删除{label} {entry_id} 吗？"):
             return
@@ -621,7 +884,8 @@ class SettingsApp(Gtk.Window):
         try:
             data, _skipped = registrylib.load_registry()
             key = {"skill": "skills", "server": "mcp_servers",
-                   "connector": "connectors"}[kind]
+                   "connector": "connectors",
+                   "channel": "channels"}[kind]
             current = None
             for entry in data[key]:
                 if entry.get("id") == entry_id:

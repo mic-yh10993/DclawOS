@@ -69,6 +69,11 @@ class MonitorApp(Gtk.Window):
 
         self.status = Gtk.Label(label="")
         self.status.set_halign(Gtk.Align.START)
+        try:
+            import theme
+            theme.apply_tnum(self.status)
+        except Exception:
+            pass
         box.pack_start(self.status, False, False, 0)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -88,6 +93,11 @@ class MonitorApp(Gtk.Window):
                   "终止所有 agent 进程。事件流请看 AI 看板。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
+        try:
+            import theme
+            theme.apply_prose(note)
+        except Exception:
+            pass
         box.pack_start(note, False, False, 0)
 
         self.store = Gtk.ListStore(str, str, str)

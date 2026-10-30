@@ -443,7 +443,14 @@ class EditorApp(Gtk.Window):
         self.buffer.set_modified(False)
         set_language(self.buffer, self.current_path)
         self.update_title()
-        self.set_status(f"已保存：{self.current_path}")
+        # Iron rule 10: the saved confirmation is self-extinguishing
+        # feedback — check + path, restored to blank after 2.5 s.
+        try:
+            import theme
+            theme.flash_feedback(self.status,
+                                 f"✓ 已保存：{self.current_path}", "")
+        except Exception:
+            self.set_status(f"已保存：{self.current_path}")
         return True
 
     def on_open(self, _button):

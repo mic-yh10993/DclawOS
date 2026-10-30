@@ -47,6 +47,14 @@
       <description>Auto lets the routing engine choose provider/model;
       manual pins ai-provider/ai-model.</description>
     </key>
+    <key name="ui-dark" type="b">
+      <default>false</default>
+      <summary>Dark UI variant</summary>
+      <description>Phase 5 module 5: when true, theme.py appends the
+      dark stylesheet variant (docs/UI-RULES.md palette) after the
+      base sheet in every DclawOS window app. The settings GUI
+      writes it; apps read it at startup.</description>
+    </key>
     <key name="agent-full-access" type="b">
       <default>false</default>
       <summary>Agent full access (unrestricted)</summary>

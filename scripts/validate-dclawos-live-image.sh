@@ -542,9 +542,13 @@ grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 
 # Phase 3 module 7: shared GUI theme + headerbars (look-only pass).
 # theme.py + theme.css must be present; every main window app must
-# call apply_theme() and carry a HeaderBar; the taskbar must NOT be
-# themed (dock layout, see theme.py docstring). CSS brace balance
-# is checked because a broken stylesheet would silently fail to load.
+# call apply_theme() and carry a HeaderBar. CSS brace balance is
+# checked because a broken stylesheet would silently fail to load.
+# POLICY CHANGE (Phase 5, user directive 2026-10-31): the taskbar
+# IS themed now — palette/typography only, via the .dclawos-taskbar
+# class scope in theme.css; its layout geometry stays as Phase 3
+# froze it. The old "taskbar must not be themed" assertion below
+# was replaced by its positive form; see docs/UI-RULES.md.
 unsquashfs -d "$WORK/theme-extract" "$FS" usr/local/lib/dclawos/theme.py usr/share/dclawos/theme.css >/dev/null 2>&1
 test -f "$WORK/theme-extract/usr/local/lib/dclawos/theme.py"
 test -f "$WORK/theme-extract/usr/share/dclawos/theme.css"
@@ -568,10 +572,64 @@ for app in dclawos-dashboard dclawos-settings dclawos-editor dclawos-chat dclawo
     grep -q 'Gtk.HeaderBar' "$src" || { echo "$app lacks a HeaderBar" >&2; exit 1; }
 done
 unsquashfs -d "$WORK/theme-shell" "$FS" usr/local/bin/dclawos-shell >/dev/null 2>&1
-if grep -q 'apply_theme' "$WORK/theme-shell/usr/local/bin/dclawos-shell"; then
-    echo "taskbar must not be themed (dock layout)" >&2
+grep -q 'apply_theme' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "taskbar lost apply_theme (Phase 5 palette alignment)" >&2
     exit 1
-fi
+}
+grep -q '\.dclawos-taskbar' "$WORK/theme-extract/usr/share/dclawos/theme.css" || {
+    echo "theme.css lost the .dclawos-taskbar scope" >&2
+    exit 1
+}
+
+# Phase 5 module 5: the 10 iron rules land in the theme system
+# (docs/UI-RULES.md). Gate-level proxies: binding palette literals
+# present, NO pure black #000 in either stylesheet (comments
+# stripped first — the rule text itself mentions #000), dark
+# variant shipped, theme.py carries the code-level helpers
+# (stream reveal, feedback fade, revealer sections, tnum, prose),
+# the schema carries ui-dark, chat applies the reveal + copy
+# feedback, and settings exposes the dark toggle.
+unsquashfs -d "$WORK/theme-dark-extract" "$FS" usr/share/dclawos/theme-dark.css >/dev/null 2>&1
+test -f "$WORK/theme-dark-extract/usr/share/dclawos/theme-dark.css"
+python3 - "$WORK/theme-extract/usr/share/dclawos/theme.css" "$WORK/theme-dark-extract/usr/share/dclawos/theme-dark.css" <<'PYEOF'
+import re
+import sys
+light = open(sys.argv[1], encoding="utf-8").read()
+dark = open(sys.argv[2], encoding="utf-8").read()
+strip = lambda css: re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+assert "#000" not in strip(light), "theme.css uses pure black"
+assert "#000" not in strip(dark), "theme-dark.css uses pure black"
+for token in ("#f5f5f3", "#fcfcfb"):
+    assert token in light, f"theme.css lost palette layer {token}"
+for token in ("#0b0b0a", "#151515", "#1a1a19", "#20201e"):
+    assert token in dark, f"theme-dark.css lost palette layer {token}"
+PYEOF
+for sym in stream_reveal flash_feedback make_section apply_tnum apply_prose; do
+    grep -q "def $sym" "$WORK/theme-extract/usr/local/lib/dclawos/theme.py" || {
+        echo "theme.py lost helper $sym" >&2
+        exit 1
+    }
+done
+grep -q 'ui-dark' "$WORK/schema-extract/usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml" || {
+    echo "schema lacks the ui-dark key" >&2
+    exit 1
+}
+grep -q 'ui-dark' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks the dark-mode toggle" >&2
+    exit 1
+}
+grep -q 'stream_reveal' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat does not apply the stream reveal" >&2
+    exit 1
+}
+grep -q '复制回答' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat lacks the copy-answer feedback action" >&2
+    exit 1
+}
+grep -q 'build_channels_panel' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks the channels page (Phase 5 WS1)" >&2
+    exit 1
+}
 
 # Phase 5 module 1: third-party channel runtime (WS1). channellib
 # + the Telegram adapter + the channel gate test must be present

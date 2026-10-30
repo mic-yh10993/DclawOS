@@ -117,10 +117,18 @@ class Dashboard(Gtk.Window):
         # Module 6 takeover banner: hidden unless a takeover request is
         # pending. The human sees it on the default desktop view and
         # clicks through to the takeover popup.
+        # Phase 5 module 5 (iron rule 7): the banner lives in a
+        # Gtk.Revealer — it slides in/out with a layout-driven
+        # height animation instead of popping.
         self.takeover_banner = Gtk.Button(label="")
-        self.takeover_banner.set_no_show_all(True)
         self.takeover_banner.connect("clicked", self.open_takeover)
-        box.pack_start(self.takeover_banner, False, False, 0)
+        self.takeover_revealer = Gtk.Revealer()
+        self.takeover_revealer.set_transition_type(
+            Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.takeover_revealer.set_transition_duration(250)
+        self.takeover_revealer.set_reveal_child(False)
+        self.takeover_revealer.add(self.takeover_banner)
+        box.pack_start(self.takeover_revealer, False, False, 0)
 
         # Module 7 monitor button: the human's watch + stop controls.
         monitor_btn = Gtk.Button(label="监视 AI（进程与叫停）")
@@ -181,9 +189,9 @@ class Dashboard(Gtk.Window):
         if pending > 0:
             self.takeover_banner.set_label(
                 f"⚠ AI 需要你帮忙：{pending} 个接管请求待处理（点击处理）")
-            self.takeover_banner.show()
+            self.takeover_revealer.set_reveal_child(True)
         else:
-            self.takeover_banner.hide()
+            self.takeover_revealer.set_reveal_child(False)
         return True
 
     def show_placeholder(self):

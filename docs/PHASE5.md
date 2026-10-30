@@ -79,12 +79,12 @@ set its token — recorded as a deliberate boundary in the audit).
 
 | # | Item | State |
 |---|---|---|
-| W2.0 | Capability audit table (human path vs agent tool) | OPEN (research; lands P5-M4) |
-| W2.1 | skill_install / skill_remove (local path or git URL; license+provenance recorded; validate then register) | OPEN (P5-M4) |
-| W2.2 | mcp_add / mcp_remove (stdio command or URL; MUST pass a live MCP initialize+tools/list handshake before the entry is kept) | OPEN (P5-M4) |
-| W2.3 | channel_manage (enable/disable, allowlist edit; no token writes) | OPEN (P5-M4) |
-| W2.4 | Remaining audit gaps (per audit table; each row named) | OPEN (P5-M4) |
-| W2.5 | Settings GUI reflects agent-side changes (single registry file, two writers — already true by construction; verified in gate) | OPEN (P5-M4) |
+| W2.0 | Capability audit table (human path vs agent tool) | CLOSED (P5-M4): full table = research PHASE5-WS2-AUDIT (G-1…G-22). Dispositions: six tools built (W2.1–W2.3 + registry_list); secret_set NOT built — deliberate boundary (tokens stay human-entered, supersedes audit G-8's suggestion; the pairing instruction outranks the audit); settings_set BLOCKED-NAMED below (W2.4); human-only BY DESIGN: full-access toggle (G-13), approval verdicts (G-14), takeover verdicts (G-15), clearing the agent's own stop flag (G-16), installer launch (G-19) — the agent may REQUEST these (takeover_request) but never grant them to itself |
+| W2.1 | skill_install / skill_remove (local path or git URL; license+provenance recorded; validate then register) | CLOSED (P5-M4): sources = local dir, local .tar.gz/.zip, http(s) archive URL, git URL (git packaged in base set). Package must contain SKILL.md + a runnable command (param, or scripts/run.sh / skill.py / index.js); single wrapping dir flattened. License REQUIRED (refused without); staged validation → land in skills-store → register once; any failure leaves no entry and no payload. skill_remove deletes the payload ONLY for agent-installed store entries. Tier 2. Installed skills are immediately runnable via skill_run (gate-verified end to end) |
+| W2.2 | mcp_add / mcp_remove (stdio command or URL; MUST pass a live MCP initialize+tools/list handshake before the entry is kept) | CLOSED (P5-M4): mcpclient gained a Streamable HTTP transport (Mcp-Session-Id, JSON or SSE-framed replies; env = headers for HTTP entries) + validate_server(). mcp_add registers NOTHING until initialize + tools/list succeed against the real server; the returned tool list is reported. Env guard: literal values for secret-looking keys are refused (secret:<name> references only). Tier 2. Gate: provisiontest handshakes a tiny stdio server AND a mock HTTP server, and calls tools on both |
+| W2.3 | channel_manage (enable/disable, allowlist edit; no token writes) | CLOSED (P5-M4): actions list (tier 0) / add / remove / enable / disable / set_allowlist (tier 2). add records the conventional secret name channel-<id> + accepts adapter options (channel_id, homeserver…); the result reports token_configured — the token itself can never be set or read through the tool |
+| W2.4 | Remaining audit gaps (per audit table; each row named) | CLOSED with named dispositions (P5-M4): registry_list built (tier 0, env redacted — literals shown as <set>, only secret: refs readable). settings_set BLOCKED-NAMED: GSettings is per-user dconf — Settings writes as the human user, the daemon reads as dclaw-agent; a daemon-side `gsettings set` would land in a database the GUI never reads = fake implementation. Needs a config-channel decision (broker set-setting op vs a shared config file) — recorded, not faked. G-18 (a general gui tool) EVALUATED, not built: dclawos-gui exists but wiring arbitrary GUI actuation as a tool would bypass the takeover path for credential-class operations; GUI work goes through takeover_request by design. G-17 no gap (subagent + cron). G-20 covered by write_file tier 2. TWO AUDIT-FOUND BUGS FIXED in this module: (1) broker param-name mismatch — model schemas say {name}, the broker wants {unit}/{package}; daemon dispatch now translates (model-issued service/package calls previously failed); (2) shell delete commands (rm/rmdir/unlink/shred argv) classified tier 1 although the privilege model says deleting is tier 2 — now tier 2 (obvious argv shapes; not a shell parser). Plus the stale dclawos-privileged header corrected (it claimed package-install was refused; 5 ops since Phase 3) |
+| W2.5 | Settings GUI reflects agent-side changes (single registry file, two writers — already true by construction; verified in gate) | CLOSED (P5-M4): one registry file; every runtime parser re-reads it per call (no daemon restart needed); Settings re-reads on panel refresh. provisiontest exercises agent-side writes through the same registrylib the GUI uses |
 
 ## WS3 — Frontend quality (the 10 iron rules)
 
@@ -98,17 +98,19 @@ palette alignment).
 | # | Item | State |
 |---|---|---|
 | W3.0 | docs/UI-RULES.md mapping (all 10 rules) | CLOSED (P5-M0, this doc set) |
-| W3.1 | Palette/focus/tnum tokens in theme.css + dark variant + ui-dark toggle | OPEN (P5-M5) |
-| W3.2 | Chat stream-reveal (rule 4) + copy-feedback 2.5 s (rule 10) | OPEN (P5-M5) |
-| W3.3 | Revealer sections (rule 7), numeric classes (rule 6), prose caps (rule 8), feedback helper (rules 9/10) across apps | OPEN (P5-M5) |
-| W3.4 | Taskbar palette/typography alignment (layout untouched) | OPEN (P5-M5) |
+| W3.1 | Palette/focus/tnum tokens in theme.css + dark variant + ui-dark toggle | CLOSED (P5-M5): theme.css rewritten on the binding palette (light #f5f5f3/#fcfcfb layers, double-ring focus, no borders, no #000); theme-dark.css ships the dark layers (#0b0b0a/#151515/#1a1a19/#20201e, weight-360 request per rule 3); `ui-dark` GSettings key + Settings toggle; theme.py FALLBACK strings byte-identical to the shipped CSS (verified). Gate-asserted (palette literals, #000 absence with comments stripped, ui-dark in schema + settings) |
+| W3.2 | Chat stream-reveal (rule 4) + copy-feedback 2.5 s (rule 10) | CLOSED (P5-M5): theme.stream_reveal (30 ms tick, 3-step alpha ramp per batch, 90 ms/30 ms stagger character as documented deviation — GTK TextView has no per-glyph blur); chat replies render through it; “复制回答” copy button with flash_feedback (✓ + 2.5 s auto-restore, rule 10). Gate-asserted tokens |
+| W3.3 | Revealer sections (rule 7), numeric classes (rule 6), prose caps (rule 8), feedback helper (rules 9/10) across apps | CLOSED (P5-M5): theme.make_section (GtkRevealer) applied to Settings registry groups + dashboard takeover banner; apply_tnum on chat/monitor/shell numeric labels (+ CSS font-feature-settings "tnum"); apply_prose on settings/monitor prose; flash_feedback also on settings secret-save status and editor save status. Per-app detail + deviations in docs/UI-RULES.md |
+| W3.4 | Taskbar palette/typography alignment (layout untouched) | CLOSED (P5-M5): dclawos-shell calls apply_theme inside a guard (theme failure can never kill the shell); palette scoped via window.dclawos-taskbar in theme.css/theme-dark.css; TASKBAR_HEIGHT=48 and all geometry unchanged. POLICY NOTE: this reverses Phase 3 M7's deliberate taskbar exclusion per the user's Phase 5 directive; the validate gate's old negative assertion was replaced by the positive form with the reason recorded in the script + UI-RULES.md |
 
 ## Module ledger
 
 | Module | Commit | Run | Result |
 |---|---|---|---|
 | P5-M0 ledger + UI-RULES docs | 25bffbf | 41090974570 (#43) | success |
-| P5-M1..M3 WS1 channels (framework, Telegram, Discord, Slack, Matrix) | (this commit) | — | pending |
+| P5-M1..M3 WS1 channels (framework, Telegram, Discord, Slack, Matrix) | e799669 | 41093929086 (#44) | success |
+| P5-M4 WS2 self-provisioning (provisioninglib, HTTP MCP, audit fixes) | 4124af3 + 1cf752d (fix) | 41097319110 (#46) | success — #45 (41096427145) failed at the gate: provisiontest hit Python 3.12-only tarfile filter= on bookworm's 3.11; product fixed with a portable hand-rolled safe extraction (1cf752d), hostile-archive case re-verified |
+| P5-M5 WS3 UI craft (theme system, dark variant, per-app application) | (this commit) | — | pending |
 
 ## Unverified / honesty boundary
 

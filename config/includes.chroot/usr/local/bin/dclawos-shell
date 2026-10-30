@@ -35,10 +35,15 @@ Reuse notes (evaluation cards §1, step 0 retrieval):
   taskbar); windowed mode unmaximizes instead. A future Wayland + mutter
   migration can use true fullscreen + layer-shell to satisfy both at once.
 """
+import os
 import shutil
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
 
 import gi
 
@@ -115,6 +120,18 @@ def get_battery_percent():
 class Taskbar(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-shell")
+        # Phase 5 module 5: the taskbar joins the shared palette
+        # and typography via theme.apply_theme(); its window class
+        # scopes the stylesheet so dock button padding (and thus
+        # the 48px height / strut geometry) does not move — see
+        # docs/UI-RULES.md. Theming is best-effort: a failure must
+        # never kill the shell.
+        try:
+            import theme
+            theme.apply_theme()
+        except Exception:
+            theme = None
+        self.get_style_context().add_class("dclawos-taskbar")
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
@@ -149,6 +166,12 @@ class Taskbar(Gtk.Window):
         bar.pack_end(self.battery, False, False, 0)
         self.clock = Gtk.Label(label="")
         bar.pack_end(self.clock, False, False, 0)
+        if theme is not None:
+            try:
+                theme.apply_tnum(self.clock)
+                theme.apply_tnum(self.battery)
+            except Exception:
+                pass
         version = Gtk.Label(label=VERSION_LABEL)
         bar.pack_end(version, False, False, 0)
         GLib.timeout_add_seconds(1, self.tick_clock)

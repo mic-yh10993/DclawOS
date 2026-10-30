@@ -62,7 +62,7 @@ except ImportError:
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib  # noqa: E402
+from gi.repository import Gtk, Gdk, GLib  # noqa: E402
 
 POLL_MS = 1000
 
@@ -88,6 +88,7 @@ class ChatWindow(Gtk.Window):
         self.set_titlebar(header)
         self.known_tasks = {}  # task id -> last known status
         self.shown_events = 0
+        self.last_reply = ""
         self.conv_session = self._load_conv_session()
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -104,6 +105,11 @@ class ChatWindow(Gtk.Window):
 
         self.status = Gtk.Label(label="")
         self.status.set_halign(Gtk.Align.START)
+        try:
+            import theme
+            theme.apply_tnum(self.status)
+        except Exception:
+            pass
         box.pack_start(self.status, False, False, 0)
 
         scrolled = Gtk.ScrolledWindow()
@@ -141,6 +147,10 @@ class ChatWindow(Gtk.Window):
         set_btn = Gtk.Button(label="设置")
         set_btn.connect("clicked", self._launch, "dclawos-settings")
         btn_row.pack_start(set_btn, False, False, 0)
+        copy_btn = Gtk.Button(label="复制回答")
+        copy_btn.connect("clicked", self.on_copy_reply)
+        btn_row.pack_start(copy_btn, False, False, 0)
+        self.copy_btn = copy_btn
         box.pack_start(btn_row, False, False, 0)
 
         self.append_line("系统：聊天窗口已就绪。" + HELP_TEXT)
@@ -202,12 +212,57 @@ class ChatWindow(Gtk.Window):
         except OSError as exc:
             self.append_line(f"系统：启动 {command} 失败：{exc}")
 
-    def append_line(self, text):
-        end = self.buffer.get_end_iter()
-        self.buffer.insert(end, text + "\n")
+    def _scroll_to_end(self):
         mark = self.buffer.create_mark(None, self.buffer.get_end_iter(),
                                        False)
         self.view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
+
+    def append_line(self, text):
+        # A streamed reply may have left the last line open (no
+        # trailing newline yet); close it before appending.
+        if self.buffer.get_char_count() > 0:
+            last = self.buffer.get_iter_at_offset(
+                self.buffer.get_char_count() - 1)
+            if last.get_char() != "\n":
+                self.buffer.insert(self.buffer.get_end_iter(), "\n")
+        end = self.buffer.get_end_iter()
+        self.buffer.insert(end, text + "\n")
+        self._scroll_to_end()
+
+    def append_reply(self, text):
+        """An AI reply: iron rule 4 staged reveal (theme helper),
+        with a plain append as the fallback. The transcript line
+        stays open (no trailing newline) until the next append."""
+        self.last_reply = text
+        if self.buffer.get_char_count() > 0:
+            last = self.buffer.get_iter_at_offset(
+                self.buffer.get_char_count() - 1)
+            if last.get_char() != "\n":
+                self.buffer.insert(self.buffer.get_end_iter(), "\n")
+        self.buffer.insert(self.buffer.get_end_iter(), "AI：")
+        try:
+            import theme
+            if theme.stream_reveal(self.view, text,
+                                   scroll_cb=self._scroll_to_end):
+                return
+        except Exception:
+            pass
+        self.buffer.insert(self.buffer.get_end_iter(), text)
+        self._scroll_to_end()
+
+    def on_copy_reply(self, _button):
+        """Iron rule 10: copy feedback shows a check and restores
+        itself after 2.5 s (theme.flash_feedback)."""
+        if not self.last_reply:
+            self.append_line("系统：还没有可复制的 AI 回答。")
+            return
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(self.last_reply, -1)
+        try:
+            import theme
+            theme.flash_feedback(self.copy_btn, "✓ 已复制", "复制回答")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ tasks
 
@@ -376,7 +431,7 @@ class ChatWindow(Gtk.Window):
                 result = task.get("result") or {}
                 if task.get("kind") == "llm" and \
                         isinstance(result, dict) and result.get("reply"):
-                    self.append_line(f"AI：{result['reply']}")
+                    self.append_reply(result["reply"])
                 elif task.get("kind") == "llm" and \
                         isinstance(result, dict) and \
                         result.get("model_configured") is False:
