@@ -288,8 +288,8 @@ grep -q 'sudo -n -E' "$WORK/installer-extract/usr/local/bin/dclawos-installer" |
     echo "installer wrapper must use sudo -n (no polkit agent on bare Openbox)" >&2
     exit 1
 }
-if grep -q 'pkexec' "$WORK/installer-extract/usr/local/bin/dclawos-installer"; then
-    echo "installer wrapper must not use pkexec" >&2
+if grep -v '^[[:space:]]*#' "$WORK/installer-extract/usr/local/bin/dclawos-installer" | grep -q 'pkexec'; then
+    echo "installer wrapper must not invoke pkexec" >&2
     exit 1
 fi
 if grep -q '/home/user' "$WORK/installer-extract/usr/local/bin/dclawos-installer"; then
