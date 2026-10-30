@@ -3,7 +3,7 @@
 
 A connector is a registry entry (registrylib "connectors" category) whose
 command is a channel adapter: it reads one JSON object on stdin and
-writes one JSON object on stdout. The only action in v1 is "send":
+writes one JSON object on stdout. Actions: "send" (v1) and "poll" (Phase 4 module 8, inbound):
 the adapter takes a human-readable message and delivers it to its
 channel, returning {"ok": true, ...} or {"ok": false, "error": ...}.
 
@@ -64,27 +64,25 @@ def list_connectors(registry_path=None):
             if e.get("enabled", True)]
 
 
-def send_message(connector_id, message, timeout=60, registry_path=None):
-    """Send message via connector_id. Returns the adapter's JSON reply.
-
-    The reply is returned verbatim except that any key named "secret"
-    or ending in "_secret" is stripped before it leaves this function,
-    so a chatty adapter cannot leak credentials into task results.
-    """
-    entry = resolve_connector(connector_id, registry_path)
+def _adapter_env(entry):
     env = dict(os.environ)
     for key, value in entry.get("env", {}).items():
         if isinstance(value, str) and value.startswith("secret:"):
             env[key] = agentlib.read_secret(value[len("secret:"):])
         else:
             env[key] = value
-    payload = json.dumps({"action": "send", "message": message})
+    return env
+
+
+def _run_adapter(entry, payload, timeout=60):
+    """Run one adapter request/response round trip. Returns the
+    adapter's JSON reply with secret-shaped keys stripped."""
     try:
         proc = subprocess.run(
             [entry["command"]] + list(entry.get("args", [])),
-            input=payload.encode("utf-8"),
+            input=json.dumps(payload).encode("utf-8"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, env=env)
+            timeout=timeout, env=_adapter_env(entry))
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "connector timed out"}
     except OSError as exc:
@@ -102,3 +100,48 @@ def send_message(connector_id, message, timeout=60, registry_path=None):
         return {"ok": False, "error": "connector reply is not an object"}
     return {k: v for k, v in reply.items()
             if k != "secret" and not k.endswith("_secret")}
+
+
+def send_message(connector_id, message, timeout=60, registry_path=None):
+    """Send message via connector_id. Returns the adapter's JSON reply.
+
+    The reply is returned verbatim except that any key named "secret"
+    or ending in "_secret" is stripped before it leaves this function,
+    so a chatty adapter cannot leak credentials into task results.
+    """
+    entry = resolve_connector(connector_id, registry_path)
+    return _run_adapter(entry, {"action": "send", "message": message},
+                        timeout=timeout)
+
+
+def poll_events(connector_id, timeout=60, registry_path=None):
+    """Poll a connector for inbound events (Phase 4 module 8, C4).
+
+    Adapter contract extension: {"action": "poll"} ->
+    {"ok": true, "events": [{"id": ..., "message": "...",
+    "sender": ...}, ...]}. The adapter owns its delivery cursor
+    (each event is returned once). Adapters that do not implement
+    poll answer with an "unknown action" error, reported here as
+    {"ok": False, "unsupported": True} so the daemon can skip them
+    quietly. Events are normalised to {id, text, sender}.
+    """
+    entry = resolve_connector(connector_id, registry_path)
+    reply = _run_adapter(entry, {"action": "poll"}, timeout=timeout)
+    if not reply.get("ok"):
+        error = str(reply.get("error", ""))
+        if "unknown action" in error:
+            return {"ok": False, "unsupported": True, "events": []}
+        return {"ok": False, "error": error, "events": []}
+    events = []
+    for raw in reply.get("events", []):
+        if not isinstance(raw, dict):
+            continue
+        text = raw.get("message") or raw.get("text") or ""
+        if not isinstance(text, str) or not text:
+            continue
+        events.append({
+            "id": str(raw.get("id", "")),
+            "text": text,
+            "sender": str(raw.get("sender", "")),
+        })
+    return {"ok": True, "events": events}

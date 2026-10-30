@@ -12,6 +12,11 @@ Actions:
       inbox and returns {"ok": true, "count": <messages in inbox>}.
   {"action": "inbox"}                 -> returns {"ok": true,
       "messages": [{ts, message}, ...]} (newest last, capped at 100).
+  {"action": "poll"}                  -> inbound runtime (Phase 4
+      module 8): returns {"ok": true, "events": [{id, message,
+      sender}, ...]} for messages appended to the INBOUND file
+      since the previous poll (cursor kept in a state file next
+      to it; each message is delivered exactly once).
 Anything else -> {"ok": false, "error": ...}.
 
 The inbox path defaults to /var/lib/dclawos/connector-inbox.jsonl
@@ -26,6 +31,11 @@ import sys
 import time
 
 DEFAULT_INBOX = "/var/lib/dclawos/connector-inbox.jsonl"
+DEFAULT_INBOUND = "/var/lib/dclawos/connector-inbound.jsonl"
+
+
+def inbound_path():
+    return os.environ.get("DCLAWOS_CONNECTOR_INBOUND", DEFAULT_INBOUND)
 
 
 def inbox_path():
@@ -76,6 +86,40 @@ def main():
         except FileNotFoundError:
             messages = []
         print(json.dumps({"ok": True, "messages": messages[-100:]}))
+        return 0
+    if action == "poll":
+        ipath = inbound_path()
+        state_path = ipath + ".pollstate"
+        try:
+            with open(state_path, "r", encoding="utf-8") as handle:
+                delivered = int(json.load(handle).get("delivered", 0))
+        except (OSError, ValueError, AttributeError):
+            delivered = 0
+        rows = []
+        try:
+            with open(ipath, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except FileNotFoundError:
+            rows = []
+        events = []
+        for index, row in enumerate(rows):
+            if index < delivered or not isinstance(row, dict):
+                continue
+            message = row.get("message")
+            if isinstance(message, str) and message:
+                events.append({"id": str(index),
+                               "message": message,
+                               "sender": str(row.get("sender", ""))})
+        parent = os.path.dirname(state_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump({"delivered": len(rows)}, handle)
+        print(json.dumps({"ok": True, "events": events}))
         return 0
     print(json.dumps({"ok": False, "error": f"unknown action: {action!r}"}))
     return 0

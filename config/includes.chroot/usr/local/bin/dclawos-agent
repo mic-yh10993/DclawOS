@@ -635,6 +635,124 @@ def run_task(task):
     return task
 
 
+
+# ------------------------------------------------------------------
+# Connector inbound runtime (Phase 4 module 8, gap row C4).
+# The daemon polls enabled connectors that implement the "poll"
+# action; each inbound event becomes an llm task bound to a
+# per-connector conversation, and when the task finishes its
+# final reply is sent back through the same connector. Pending
+# replies persist in a JSON file so a daemon restart does not
+# lose a delivery.
+# ------------------------------------------------------------------
+
+CONNECTOR_POLL_EVERY_CYCLES = 15
+
+
+def _connector_pending_path():
+    return os.environ.get(
+        "DCLAWOS_CONNECTOR_PENDING",
+        "/var/lib/dclawos/connector-pending.json")
+
+
+def _load_pending():
+    try:
+        with open(_connector_pending_path(), "r",
+                  encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_pending(pending):
+    path = _connector_pending_path()
+    parent = os.path.dirname(path)
+    if parent:
+        agentlib.ensure_exchange_dir(parent)
+    agentlib.atomic_write(
+        path, json.dumps(pending, indent=2, sort_keys=True) + "\n")
+
+
+def _connector_session(connector_id):
+    import hashlib
+    return hashlib.sha256(
+        ("connector:" + connector_id).encode("utf-8")).hexdigest()[:16]
+
+
+def _poll_connectors():
+    import connectorlib
+    pending = _load_pending()
+    changed = False
+    for connector in connectorlib.list_connectors():
+        connector_id = connector["id"]
+        try:
+            result = connectorlib.poll_events(connector_id)
+        except ValueError:
+            continue  # disabled/unknown between list and poll
+        if not result.get("ok"):
+            if not result.get("unsupported"):
+                log(f"connector {connector_id} poll error: "
+                    f"{result.get('error')}")
+            continue
+        for event in result.get("events", []):
+            task = agentlib.new_task(
+                f"connector {connector_id}", event["text"], [])
+            task["kind"] = "llm"
+            task["conv_session"] = _connector_session(connector_id)
+            agentlib.save_task(task)
+            pending[task["id"]] = {"connector": connector_id}
+            changed = True
+            agentlib.log_event(
+                "system",
+                f"connector {connector_id} inbound -> task "
+                f"{task['id']}",
+                session=task["session"])
+    if changed:
+        _save_pending(pending)
+
+
+def _flush_pending_replies():
+    import connectorlib
+    pending = _load_pending()
+    if not pending:
+        return
+    changed = False
+    for task_id in list(pending):
+        try:
+            task = agentlib.load_task(task_id)
+        except (OSError, ValueError):
+            pending.pop(task_id, None)
+            changed = True
+            continue
+        if task.get("status") not in ("done", "failed", "cancelled"):
+            continue
+        info = pending.pop(task_id)
+        changed = True
+        connector_id = info.get("connector", "")
+        reply = ""
+        if task.get("status") == "done":
+            reply = str((task.get("result") or {}).get("reply") or "")
+        if reply:
+            try:
+                outcome = connectorlib.send_message(connector_id, reply)
+                if not outcome.get("ok"):
+                    log(f"connector {connector_id} reply failed: "
+                        f"{outcome.get('error')}")
+            except ValueError as exc:
+                log(f"connector reply error: {exc}")
+        else:
+            agentlib.log_event(
+                "system",
+                f"connector task {task_id} finished without a reply; "
+                "nothing sent (no fabricated text)",
+                session=task.get("session", ""))
+    if changed:
+        _save_pending(pending)
+
+
 def serve_forever():
     lock_path = "/var/lib/dclawos/agent.lock"
     try:
@@ -661,6 +779,7 @@ def serve_forever():
             except Exception as exc:  # noqa: BLE001 - logged, not fatal
                 log(f"task {tid} crashed: {exc}")
 
+    poll_cycle = 0
     while True:
         try:
             _collect_done()
@@ -669,6 +788,14 @@ def serve_forever():
                 cronlib.fire_due()
             except Exception as exc:  # noqa: BLE001 - cron is additive
                 log(f"cron fire error (continuing): {exc}")
+            try:
+                _flush_pending_replies()
+                poll_cycle += 1
+                if poll_cycle >= CONNECTOR_POLL_EVERY_CYCLES:
+                    poll_cycle = 0
+                    _poll_connectors()
+            except Exception as exc:  # noqa: BLE001 - inbound is additive
+                log(f"connector inbound error (continuing): {exc}")
             if len(in_flight) < MAX_PARALLEL:
                 task = agentlib.next_queued_task()
                 if task is not None and task["id"] not in in_flight:

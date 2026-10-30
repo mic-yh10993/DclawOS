@@ -235,6 +235,58 @@ def main():
     if not any("gate summary" in str(m.get("content", ""))
                for m in projected):
         fail("projected messages do not surface the summary")
+    # --- Phase 4 module 8 gate: connector inbound --------------
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "dclawos_agent_mod8", "/usr/local/bin/dclawos-agent")
+    spec = importlib.util.spec_from_loader("dclawos_agent_mod8",
+                                            loader)
+    agent_mod8 = importlib.util.module_from_spec(spec)
+    loader.exec_module(agent_mod8)
+    conn_tmp = tempfile.mkdtemp(prefix="dclawos-conn-test-")
+    os.environ["DCLAWOS_CONNECTOR_INBOX"] = os.path.join(
+        conn_tmp, "inbox.jsonl")
+    os.environ["DCLAWOS_CONNECTOR_INBOUND"] = os.path.join(
+        conn_tmp, "inbound.jsonl")
+    os.environ["DCLAWOS_CONNECTOR_PENDING"] = os.path.join(
+        conn_tmp, "pending.json")
+    registry = {"skills": [], "mcp_servers": [], "connectors": [{
+        "id": "local", "name": "Local",
+        "command": "/usr/local/bin/dclawos-connector-local",
+        "args": [], "env": {}, "description": "", "license": "",
+        "enabled": True}]}
+    reg_path = os.path.join(conn_tmp, "registry.json")
+    with open(reg_path, "w", encoding="utf-8") as handle:
+        json.dump(registry, handle)
+    os.environ["DCLAWOS_REGISTRY"] = reg_path
+    with open(os.environ["DCLAWOS_CONNECTOR_INBOUND"], "w",
+              encoding="utf-8") as handle:
+        handle.write(json.dumps(
+            {"message": "hello from outside", "sender": "gate"}) + "\n")
+    before = len(agentlib.list_tasks())
+    agent_mod8._poll_connectors()
+    tasks_now = agentlib.list_tasks()
+    if len(tasks_now) != before + 1:
+        fail("connector poll did not create exactly one task")
+    agent_mod8._poll_connectors()
+    if len(agentlib.list_tasks()) != before + 1:
+        fail("connector poll redelivered an event")
+    pending_now = agent_mod8._load_pending()
+    if len(pending_now) != 1:
+        fail(f"connector pending map wrong: {pending_now}")
+    inbound_task = agentlib.load_task(next(iter(pending_now)))
+    inbound_task["status"] = "done"
+    inbound_task["result"] = {"reply": "gate reply"}
+    agentlib.save_task(inbound_task)
+    agent_mod8._flush_pending_replies()
+    with open(os.environ["DCLAWOS_CONNECTOR_INBOX"],
+              encoding="utf-8") as handle:
+        inbox_text = handle.read()
+    if "gate reply" not in inbox_text:
+        fail("connector reply was not routed back to the adapter")
+    if agent_mod8._load_pending():
+        fail("connector pending map not drained after flush")
     server.shutdown()
     print("agentlooptest OK: tool-call round trip, transcript, cost "
           "accounting and honest model-less path verified against "
