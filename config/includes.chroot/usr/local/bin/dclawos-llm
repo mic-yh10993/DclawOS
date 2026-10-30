@@ -267,8 +267,13 @@ async function main() {
     let q = L.qualityOf("gateprov", "gatemodel");
     assert(q.samples === 5 && q.successEwma === 1, `quality after successes: ${JSON.stringify(q)}`);
     const fs = require("node:fs");
+    // Same resolution as qualityStore.stateDir(): the env override
+    // when set, else the default engine-state directory. (Run #36
+    // failed here: the gate assumed the env var was always set.)
+    const stateDir = process.env.DCLAWOS_STATE_DIR ||
+      "/var/lib/dclawos/engine-state";
     const persisted = JSON.parse(fs.readFileSync(
-      `${process.env.DCLAWOS_STATE_DIR}/provider-quality.json`, "utf8"));
+      `${stateDir}/provider-quality.json`, "utf8"));
     assert(persisted["gateprov::gatemodel"] && persisted["gateprov::gatemodel"].samples === 5,
       "quality samples persisted to the file-state store");
     for (let i = 0; i < 5; i += 1) L.recordQuality("gateprov", "gatemodel", false, 500, 900);
