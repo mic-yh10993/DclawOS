@@ -71,6 +71,16 @@ class ChatWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-chat — AI 聊天")
         self.set_default_size(760, 520)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("AI 聊天")
+        header.set_subtitle("指派任务与工具控制台")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
         self.known_tasks = {}  # task id -> last known status
         self.shown_events = 0
 

@@ -48,6 +48,16 @@ class MonitorApp(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-monitor")
         self.set_default_size(800, 500)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("监视 AI")
+        header.set_subtitle("进程状态与叫停")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)

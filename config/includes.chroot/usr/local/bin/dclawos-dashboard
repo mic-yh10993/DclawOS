@@ -95,6 +95,16 @@ class Dashboard(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-dashboard")
         self.set_default_size(1024, 700)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("AI 看板")
+        header.set_subtitle("AI 运行状态")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)

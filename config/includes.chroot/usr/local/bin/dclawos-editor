@@ -130,6 +130,16 @@ class CompareWindow(Gtk.Window):
         super().__init__(title="dclawos-editor — 对比")
         self.set_default_size(1000, 650)
         try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("文件对比")
+        header.set_subtitle("只读对比")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
+        try:
             left_text = load_text(left_path)
             right_text = load_text(right_path)
         except OSError as exc:
@@ -251,6 +261,16 @@ class EditorApp(Gtk.Window):
     def __init__(self, initial_path):
         super().__init__(title="dclawos-editor")
         self.set_default_size(1000, 700)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("编辑器")
+        header.set_subtitle("代码编辑")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
         self.current_path = None
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)

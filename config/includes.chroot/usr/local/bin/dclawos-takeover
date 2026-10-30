@@ -48,6 +48,16 @@ class TakeoverApp(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-takeover")
         self.set_default_size(700, 500)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("人工接管")
+        header.set_subtitle("AI 请求你接管")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)

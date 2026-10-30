@@ -508,6 +508,39 @@ grep -q 'dclawos-editor' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dash
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
 grep -q 'DclawOS 2.0' "$WORK/release-extract/usr/share/dclawos/release"
 
+# Phase 3 module 7: shared GUI theme + headerbars (look-only pass).
+# theme.py + theme.css must be present; every main window app must
+# call apply_theme() and carry a HeaderBar; the taskbar must NOT be
+# themed (dock layout, see theme.py docstring). CSS brace balance
+# is checked because a broken stylesheet would silently fail to load.
+unsquashfs -d "$WORK/theme-extract" "$FS" usr/local/lib/dclawos/theme.py usr/share/dclawos/theme.css >/dev/null 2>&1
+test -f "$WORK/theme-extract/usr/local/lib/dclawos/theme.py"
+test -f "$WORK/theme-extract/usr/share/dclawos/theme.css"
+python3 -m py_compile "$WORK/theme-extract/usr/local/lib/dclawos/theme.py"
+python3 - "$WORK/theme-extract/usr/share/dclawos/theme.css" <<'PYEOF'
+import sys
+css = open(sys.argv[1]).read()
+assert css.count("{") == css.count("}"), "theme.css braces unbalanced"
+assert "headerbar" in css, "theme.css lacks headerbar styling"
+PYEOF
+for app in dclawos-dashboard dclawos-settings dclawos-editor dclawos-chat dclawos-approve dclawos-monitor dclawos-takeover; do
+    case "$app" in
+        dclawos-dashboard) src="$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" ;;
+        dclawos-settings) src="$WORK/settings-extract/usr/local/bin/dclawos-settings" ;;
+        dclawos-editor) src="$WORK/editor-extract/usr/local/bin/dclawos-editor" ;;
+        *) unsquashfs -d "$WORK/theme-app-$app" "$FS" "usr/local/bin/$app" >/dev/null 2>&1
+           src="$WORK/theme-app-$app/usr/local/bin/$app" ;;
+    esac
+    grep -q 'import theme' "$src" || { echo "$app lacks theme import" >&2; exit 1; }
+    grep -q 'theme.apply_theme()' "$src" || { echo "$app does not call apply_theme" >&2; exit 1; }
+    grep -q 'Gtk.HeaderBar' "$src" || { echo "$app lacks a HeaderBar" >&2; exit 1; }
+done
+unsquashfs -d "$WORK/theme-shell" "$FS" usr/local/bin/dclawos-shell >/dev/null 2>&1
+if grep -q 'apply_theme' "$WORK/theme-shell/usr/local/bin/dclawos-shell"; then
+    echo "taskbar must not be themed (dock layout)" >&2
+    exit 1
+fi
+
 # Initramfs must contain live-boot (the live session depends on it).
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2

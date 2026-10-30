@@ -60,6 +60,16 @@ class SettingsApp(Gtk.Window):
         super().__init__(title="dclawos-settings")
         self.settings = settings
         self.set_default_size(900, 600)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("设置")
+        header.set_subtitle("DclawOS 系统设置")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.add(paned)

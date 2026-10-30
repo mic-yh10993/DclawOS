@@ -62,6 +62,16 @@ class ApproveApp(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-approve")
         self.set_default_size(700, 420)
+        try:
+            import theme
+            theme.apply_theme()
+        except ImportError:
+            pass
+        header = Gtk.HeaderBar()
+        header.set_title("审批")
+        header.set_subtitle("特权票据审批")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)
