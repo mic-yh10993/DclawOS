@@ -177,3 +177,15 @@ Compiled at image build time (NOT a prebuilt blob) by hook
   /usr/share/dclawos/engine/catalog.json (validated as JSON) and
   dclawos-route --selftest as a real behavior gate. Any step failing
   fails the whole build; the engine is never silently skipped.
+
+## Phase 4 module 1 additions
+
+- `dclawos/llm.ts` + `dclawos/llmClaude.ts` (GPL, DclawOS-written):
+  the LLM execution path. Bundled separately as `engine/llm.js`
+  (decision.js stays dispatch-free), invoked via the `dclawos-llm`
+  CLI. Registry-driven executor (OpenAI-shaped providers directly;
+  Anthropic via the adapted translator branch in llmClaude.ts),
+  dispatch() attempt loop, cost from real response usage x
+  `providerCostData` pricing, `cost_envelope` emitted per executed
+  request. Build hook runs `dclawos-llm --selftest` against a local
+  mock endpoint; no real keys exist in the build.

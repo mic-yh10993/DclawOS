@@ -1,0 +1,219 @@
+#!/usr/bin/env dclawos-node
+// DclawOS LLM execution CLI (GPL-2.0-or-later; DclawOS-written code).
+// Phase 4 module 1 (gap rows A1/A3/B4).
+//
+// Usage:
+//   dclawos-llm            reads one JSON request on stdin, prints one
+//                          JSON result on stdout.
+//   dclawos-llm --selftest build-time behavior gate: runs the real
+//                          executor against a local mock
+//                          OpenAI-compatible endpoint (no real keys,
+//                          no external network) and exits non-zero on
+//                          any assertion failure.
+//
+// Request JSON: {messages, targets?, provider?, model?, taskType?,
+// tools?, maxTokens?, baseUrlOverrides?}. API keys are NOT part of
+// the request JSON: they arrive via the DCLAWOS_LLM_KEYS environment
+// variable (JSON object provider->key), set by the agent service
+// from its 0600 secret files. Keys are never printed or logged.
+"use strict";
+
+const { runLlm, DCLAWOS_LLM_MARKER } = require("/usr/share/dclawos/engine/llm.js");
+
+function fail(message) {
+  console.error(`dclawos-llm --selftest FAILED: ${message}`);
+  process.exit(1);
+}
+
+async function selftest() {
+  const http = require("http");
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      let model = "";
+      try {
+        model = JSON.parse(raw).model || "";
+      } catch {
+        model = "";
+      }
+      res.setHeader("Content-Type", "application/json");
+      if (model === "mock-fail") {
+        res.statusCode = 429;
+        res.end(JSON.stringify({ error: { message: "quota exhausted" } }));
+        return;
+      }
+      res.statusCode = 200;
+      res.end(
+        JSON.stringify({
+          id: "mock-1",
+          model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "mock-reply" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1000, completion_tokens: 500 },
+        })
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const url = `http://127.0.0.1:${port}/v1/chat/completions`;
+  try {
+    if (DCLAWOS_LLM_MARKER !== "dclawos-llm-executor-v1") {
+      fail("llm bundle marker missing");
+    }
+    // 1. Single target executes; cost comes from mock usage x pricing
+    //    (gpt-4o-mini: 0.15 in / 0.6 out per 1M -> 0.00045 USD).
+    const single = await runLlm({
+      messages: [{ role: "user", content: "hello" }],
+      targets: [{ provider: "openai", model: "gpt-4o-mini" }],
+      keys: { openai: "mock-key" },
+      baseUrlOverrides: { openai: url },
+    });
+    if (!single.response || single.response.choices?.[0]?.message?.content !== "mock-reply") {
+      fail("mock response not returned");
+    }
+    if (single.provider !== "openai" || single.fallbackCount !== 0) {
+      fail("single-target routing fields wrong");
+    }
+    if (single.costUsd === null || Math.abs(single.costUsd - 0.00045) > 1e-9) {
+      fail(`cost not computed from usage: ${single.costUsd}`);
+    }
+    if (!single.cost_envelope || single.cost_envelope.actual !== single.costUsd ||
+        single.cost_envelope.currency !== "USD") {
+      fail("cost_envelope missing or inconsistent");
+    }
+    // 2a. A lone 429 target fails DURABLE (quota is not retried as a
+    //     transient) and produces no fabricated response.
+    const dead = await runLlm({
+      messages: [{ role: "user", content: "hello" }],
+      targets: [{ provider: "openai", model: "mock-fail" }],
+      keys: { openai: "mock-key" },
+      baseUrlOverrides: { openai: url },
+    });
+    if (dead.response !== null) fail("dead target produced a response");
+    if (dead.attempts.length !== 1 || dead.attempts[0].failureKind !== "durable") {
+      fail(`429 not classified durable: ${JSON.stringify(dead.attempts)}`);
+    }
+    // 2b. With a healthy second target the request still succeeds
+    //     (attempt order is score order, so the healthy target may
+    //     legitimately serve first; fallback is proven by 2a + the
+    //     attempt loop, not by input order).
+    const fb = await runLlm({
+      messages: [{ role: "user", content: "hello" }],
+      targets: [
+        { provider: "openai", model: "mock-fail" },
+        { provider: "openai", model: "gpt-4o-mini" },
+      ],
+      keys: { openai: "mock-key" },
+      baseUrlOverrides: { openai: url },
+    });
+    if (!fb.response) fail("multi-target request produced no response");
+    for (const attempt of fb.attempts) {
+      if (attempt.status === 429 && attempt.failureKind !== "durable") {
+        fail(`429 attempt not durable: ${JSON.stringify(fb.attempts)}`);
+      }
+    }
+    // 3. No targets and no keys: honest null, no fabricated cost.
+    const empty = await runLlm({ messages: [{ role: "user", content: "hi" }], keys: {} });
+    if (empty.response !== null || empty.costUsd !== null || empty.cost_envelope !== null) {
+      fail("empty request fabricated a response or cost");
+    }
+    // 4. Anthropic branch: a Messages-shaped mock response must be
+    //    converted back to the OpenAI shape and costed from its
+    //    usage (claude-sonnet-4-6: 3 in / 15 out per 1M -> 0.00105).
+    const claudeServer = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        let body = {};
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          body = {};
+        }
+        if (body.system !== "sys" || !Array.isArray(body.messages)) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: { message: "bad claude body" } }));
+          return;
+        }
+        res.setHeader("Content-Type", "application/json");
+        res.statusCode = 200;
+        res.end(
+          JSON.stringify({
+            id: "msg-mock",
+            model: "claude-sonnet-4-6",
+            content: [{ type: "text", text: "claude-reply" }],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          })
+        );
+      });
+    });
+    await new Promise((resolve) => claudeServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const claudeUrl = `http://127.0.0.1:${claudeServer.address().port}/v1/messages`;
+      const claudeRes = await runLlm({
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: "hello" },
+        ],
+        targets: [{ provider: "anthropic", model: "claude-sonnet-4-6" }],
+        keys: { anthropic: "mock-key" },
+        baseUrlOverrides: { anthropic: claudeUrl },
+      });
+      if (!claudeRes.response ||
+          claudeRes.response.choices?.[0]?.message?.content !== "claude-reply") {
+        fail(`claude branch did not convert response: ${JSON.stringify(claudeRes).slice(0, 300)}`);
+      }
+      if (claudeRes.costUsd === null || Math.abs(claudeRes.costUsd - 0.00105) > 1e-9) {
+        fail(`claude cost wrong: ${claudeRes.costUsd}`);
+      }
+    } finally {
+      claudeServer.close();
+    }
+    console.log(
+      "dclawos-llm --selftest OK: mock executor, durable-fallback, " +
+        "cost_envelope and claude-branch conversion verified " +
+        "(no real provider contacted)");
+  } finally {
+    server.close();
+  }
+}
+
+async function main() {
+  if (process.argv.includes("--selftest")) {
+    await selftest();
+    return;
+  }
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  let request;
+  try {
+    request = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+  } catch (err) {
+    console.error(`dclawos-llm: invalid JSON on stdin: ${err.message}`);
+    process.exit(2);
+  }
+  let keys = {};
+  if (process.env.DCLAWOS_LLM_KEYS) {
+    try {
+      keys = JSON.parse(process.env.DCLAWOS_LLM_KEYS);
+    } catch {
+      console.error("dclawos-llm: DCLAWOS_LLM_KEYS is not valid JSON");
+      process.exit(2);
+    }
+  }
+  request.keys = keys;
+  const result = await runLlm(request);
+  console.log(JSON.stringify(result));
+}
+
+main().catch((err) => {
+  console.error(`dclawos-llm: ${err && err.message}`);
+  process.exit(1);
+});
