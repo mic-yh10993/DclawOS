@@ -104,8 +104,27 @@ def highlight_lines(buffer, start_line, end_line):
     buffer.apply_tag(tag, start, end)
 
 
+def highlight_range(buffer, line, start_char, end_char, tag_name, color):
+    """Highlight [start_char, end_char) on one line with tag_name."""
+    if end_char <= start_char:
+        return
+    tag_table = buffer.get_tag_table()
+    tag = tag_table.lookup(tag_name)
+    if tag is None:
+        tag = buffer.create_tag(tag_name, background=color)
+    start = buffer.get_iter_at_line_offset(line, start_char)
+    end = buffer.get_iter_at_line_offset(line, end_char)
+    buffer.apply_tag(tag, start, end)
+
+
 class CompareWindow(Gtk.Window):
-    """Read-only side-by-side diff of two files (native, difflib)."""
+    """Read-only side-by-side diff of two files (native, difflib).
+
+    Phase 3 module 6: the two panes scroll in sync, and replace
+    opcodes with equal line counts additionally highlight the
+    changed characters within each line pair (char-level diff on top
+    of the existing line-level highlight).
+    """
 
     def __init__(self, left_path, right_path):
         super().__init__(title="dclawos-editor — 对比")
@@ -145,6 +164,21 @@ class CompareWindow(Gtk.Window):
                 continue
             highlight_lines(left_buffer, i1, i2)
             highlight_lines(right_buffer, j1, j2)
+            if tag == "replace" and (i2 - i1) == (j2 - j1):
+                for offset in range(i2 - i1):
+                    left_line = left_lines[i1 + offset]
+                    right_line = right_lines[j1 + offset]
+                    char_ops = difflib.SequenceMatcher(
+                        None, left_line, right_line).get_opcodes()
+                    for ctag, a1, a2, b1, b2 in char_ops:
+                        if ctag == "equal":
+                            continue
+                        highlight_range(left_buffer, i1 + offset,
+                                        a1, a2, "dclawos-changed-char",
+                                        "#ffb74d")
+                        highlight_range(right_buffer, j1 + offset,
+                                        b1, b2, "dclawos-changed-char",
+                                        "#ffb74d")
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         left_scrolled = Gtk.ScrolledWindow()
         left_scrolled.add(left_view)
@@ -152,6 +186,31 @@ class CompareWindow(Gtk.Window):
         right_scrolled = Gtk.ScrolledWindow()
         right_scrolled.add(right_view)
         paned.pack2(right_scrolled, True, False)
+        # Scroll sync: mirror the vertical adjustment both ways. The
+        # guard flag breaks the feedback loop (setting one adjustment
+        # fires the other's handler, which must then do nothing).
+        self._syncing_scroll = False
+
+        def sync_from_left(_adj):
+            if self._syncing_scroll:
+                return
+            self._syncing_scroll = True
+            right_scrolled.get_vadjustment().set_value(
+                left_scrolled.get_vadjustment().get_value())
+            self._syncing_scroll = False
+
+        def sync_from_right(_adj):
+            if self._syncing_scroll:
+                return
+            self._syncing_scroll = True
+            left_scrolled.get_vadjustment().set_value(
+                right_scrolled.get_vadjustment().get_value())
+            self._syncing_scroll = False
+
+        left_scrolled.get_vadjustment().connect(
+            "value-changed", sync_from_left)
+        right_scrolled.get_vadjustment().connect(
+            "value-changed", sync_from_right)
         box.pack_start(paned, True, True, 0)
         self.show_all()
 
@@ -207,7 +266,14 @@ class EditorApp(Gtk.Window):
         btn_compare.connect("clicked", self.on_compare)
         btn_terminal = Gtk.Button(label="在终端打开所在目录")
         btn_terminal.connect("clicked", self.on_terminal)
-        for btn in (btn_open, btn_save, btn_compare, btn_terminal):
+        # Phase 3 module 6: undo/redo buttons (GtkSource.Buffer
+        # natively supports them; previously only Ctrl+Z/Y existed).
+        btn_undo = Gtk.Button(label="撤销")
+        btn_undo.connect("clicked", self.on_undo)
+        btn_redo = Gtk.Button(label="重做")
+        btn_redo.connect("clicked", self.on_redo)
+        for btn in (btn_open, btn_save, btn_compare, btn_terminal,
+                    btn_undo, btn_redo):
             toolbar.pack_start(btn, False, False, 0)
         box.pack_start(toolbar, False, False, 0)
 
@@ -223,6 +289,31 @@ class EditorApp(Gtk.Window):
         find_row.pack_start(btn_next, False, False, 0)
         find_row.pack_start(btn_prev, False, False, 0)
         box.pack_start(find_row, False, False, 0)
+
+        # Phase 3 module 6: replace row + goto-line row (native,
+        # no browser engine). Replace uses plain-text search so it
+        # behaves identically to find.
+        replace_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        replace_row.pack_start(Gtk.Label(label="替换为："), False, False, 0)
+        self.replace_entry = Gtk.Entry()
+        replace_row.pack_start(self.replace_entry, True, True, 0)
+        btn_replace = Gtk.Button(label="替换")
+        btn_replace.connect("clicked", self.on_replace)
+        btn_replace_all = Gtk.Button(label="全部替换")
+        btn_replace_all.connect("clicked", self.on_replace_all)
+        replace_row.pack_start(btn_replace, False, False, 0)
+        replace_row.pack_start(btn_replace_all, False, False, 0)
+        box.pack_start(replace_row, False, False, 0)
+
+        goto_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        goto_row.pack_start(Gtk.Label(label="跳到行："), False, False, 0)
+        self.goto_entry = Gtk.Entry()
+        self.goto_entry.connect("activate", self.on_goto_line)
+        goto_row.pack_start(self.goto_entry, False, False, 0)
+        btn_goto = Gtk.Button(label="跳转")
+        btn_goto.connect("clicked", self.on_goto_line)
+        goto_row.pack_start(btn_goto, False, False, 0)
+        box.pack_start(goto_row, False, False, 0)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.sidebar_store = Gtk.ListStore(str, str)
@@ -414,6 +505,88 @@ class EditorApp(Gtk.Window):
 
     def on_find_prev(self, _widget):
         self.find(forward=False)
+
+    def on_undo(self, _button):
+        if self.buffer.can_undo():
+            self.buffer.undo()
+        else:
+            self.set_status("没有可撤销的操作")
+
+    def on_redo(self, _button):
+        if self.buffer.can_redo():
+            self.buffer.redo()
+        else:
+            self.set_status("没有可重做的操作")
+
+    def on_replace(self, _button):
+        """Replace the next match after the cursor (or the current
+        selection if it already equals the search text)."""
+        needle = self.find_entry.get_text()
+        replacement = self.replace_entry.get_text()
+        if not needle:
+            self.set_status("请先输入查找内容")
+            return
+        start, end = self.buffer.get_selection_bounds() \
+            if self.buffer.get_has_selection() else (None, None)
+        if start is not None and \
+                self.buffer.get_text(start, end, True) == needle:
+            self.buffer.delete(start, end)
+            self.buffer.insert(start, replacement)
+            self.set_status("已替换 1 处")
+            return
+        cursor = self.buffer.get_iter_at_mark(
+            self.buffer.get_insert())
+        found = cursor.forward_search(
+            needle, Gtk.TextSearchFlags(0), None)
+        if not found:
+            self.set_status("未找到")
+            return
+        match_start, match_end = found
+        self.buffer.delete(match_start, match_end)
+        self.buffer.insert(match_start, replacement)
+        self.set_status("已替换 1 处")
+
+    def on_replace_all(self, _button):
+        needle = self.find_entry.get_text()
+        replacement = self.replace_entry.get_text()
+        if not needle:
+            self.set_status("请先输入查找内容")
+            return
+        count = 0
+        self.buffer.begin_user_action()
+        try:
+            cursor = self.buffer.get_start_iter()
+            while True:
+                found = cursor.forward_search(
+                    needle, Gtk.TextSearchFlags(0), None)
+                if not found:
+                    break
+                match_start, match_end = found
+                self.buffer.delete(match_start, match_end)
+                self.buffer.insert(match_start, replacement)
+                count += 1
+                # Continue after the replacement so a replacement
+                # containing the needle cannot loop forever.
+                cursor = self.buffer.get_iter_at_offset(
+                    match_start.get_offset() + len(replacement))
+        finally:
+            self.buffer.end_user_action()
+        self.set_status(f"已替换 {count} 处")
+
+    def on_goto_line(self, _widget):
+        try:
+            line_no = int(self.goto_entry.get_text().strip())
+        except ValueError:
+            self.set_status("行号必须是数字")
+            return
+        line_count = self.buffer.get_line_count()
+        if line_no < 1 or line_no > line_count:
+            self.set_status(f"行号超出范围（1–{line_count}）")
+            return
+        line_iter = self.buffer.get_iter_at_line(line_no - 1)
+        self.buffer.place_cursor(line_iter)
+        self.view.scroll_to_iter(line_iter, 0.0, False, 0.0, 0.0)
+        self.set_status(f"已跳到第 {line_no} 行")
 
     def on_sidebar_open(self, _tree, path, _column):
         tree_iter = self.sidebar_store.get_iter(path)
