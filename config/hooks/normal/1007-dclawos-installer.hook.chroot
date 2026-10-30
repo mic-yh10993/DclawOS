@@ -1,0 +1,147 @@
+#!/bin/sh
+# DclawOS installer setup (Phase 3 module 5): Calamares + Debian
+# settings, patched for DclawOS 2.0. Adapted from the 1.0 hook 1600
+# PATTERN (settings patch, packages removal, shellprocess
+# registration, tool hard checks); 1.0's GNOME/GDM/`user`-account
+# content is NOT carried over — 2.0 uses LightDM + dclaw + the
+# target postinstall in dclawos-target-postinstall.sh.
+#
+# Hard-fail items abort the build (a broken installer must not ship);
+# warn-only items are format-uncertain (settings-debian version
+# differences) and are re-checked leniently by the image gate.
+set -eu
+
+# ---- tool + module hard checks (offline install must work) ----
+command -v unsquashfs >/dev/null 2>&1 || {
+    echo "DclawOS: squashfs-tools/unsquashfs is required by unpackfs" >&2
+    exit 1
+}
+command -v rsync >/dev/null 2>&1 || {
+    echo "DclawOS: rsync is required by Calamares unpackfs" >&2
+    exit 1
+}
+find /usr/lib -path '*/calamares/modules/partition/libcalamares_viewmodule_partition.so' -print -quit | grep -q . || {
+    echo "DclawOS: Calamares partition module missing" >&2
+    exit 1
+}
+find /usr/lib -path '*/calamares/modules/mount/module.desc' -print -quit | grep -q . || {
+    echo "DclawOS: Calamares mount module missing" >&2
+    exit 1
+}
+for grub_platform_dir in /usr/lib/grub/i386-pc /usr/lib/grub/x86_64-efi; do
+    [ -f "$grub_platform_dir/modinfo.sh" ] || {
+        echo "DclawOS: GRUB platform modules missing: $grub_platform_dir (offline bootloader install would fail)" >&2
+        exit 1
+    }
+done
+command -v calamares >/dev/null 2>&1 || {
+    echo "DclawOS: calamares binary missing" >&2
+    exit 1
+}
+
+SETTINGS=/etc/calamares/settings.conf
+[ -f "$SETTINGS" ] || {
+    echo "DclawOS: calamares-settings-debian settings.conf missing" >&2
+    exit 1
+}
+
+# ---- branding: Debian default -> dclawos ----
+if grep -qE '^[[:space:]]*branding:' "$SETTINGS"; then
+    sed -i -E 's|^([[:space:]]*branding:)[[:space:]]*.*$|\1 dclawos|' "$SETTINGS"
+else
+    echo "DclawOS: Calamares settings have no branding selector" >&2
+    exit 1
+fi
+BRANDING=/etc/calamares/branding/dclawos
+for branding_file in branding.desc show.qml stylesheet.qss dclawos-mark.svg; do
+    [ -s "$BRANDING/$branding_file" ] || {
+        echo "DclawOS: branding file missing: $BRANDING/$branding_file" >&2
+        exit 1
+    }
+done
+
+# ---- offline install: remove the apt-capable packages module ----
+if grep -qE '^[[:space:]]*-[[:space:]]*packages[[:space:]]*$' "$SETTINGS"; then
+    sed -i -E '/^[[:space:]]*-[[:space:]]*packages[[:space:]]*$/d' "$SETTINGS"
+    echo "DclawOS: removed packages module from Calamares sequence (offline install)"
+fi
+mkdir -p /etc/calamares/modules
+cat > /etc/calamares/modules/packages.conf <<'EOF'
+---
+backend: apt
+operations: []
+EOF
+
+# ---- target postinstall: register + insert after bootloader ----
+# Order requirement (design §3.3): after users (account exists) AND
+# after bootloader, before umount. The standard settings-debian
+# sequence already orders users before bootloader, so inserting after
+# the bootloader entry satisfies both; the image gate re-verifies the
+# order (users line < postinstall line < umount line when present).
+if ! grep -q '^[[:space:]]*-[[:space:]]*id:[[:space:]]*dclawos-postinstall' "$SETTINGS" 2>/dev/null; then
+    cat >> "$SETTINGS" <<'EOF'
+
+instances:
+- id: dclawos-postinstall
+  module: shellprocess
+  config: dclawos-postinstall.conf
+EOF
+fi
+if ! grep -q '^[[:space:]]*-[[:space:]]*shellprocess@dclawos-postinstall[[:space:]]*$' "$SETTINGS"; then
+    awk '
+        /^[[:space:]]*-[[:space:]]*exec:[[:space:]]*$/ { in_exec=1 }
+        !done && in_exec && /^[[:space:]]*-[[:space:]]*bootloader[[:space:]]*$/ {
+            indent=$0; sub(/[^[:space:]].*/, "", indent)
+            print $0
+            print indent "- shellprocess@dclawos-postinstall"
+            done=1
+            next
+        }
+        { print }
+    ' "$SETTINGS" > "$SETTINGS.dclawos" && mv "$SETTINGS.dclawos" "$SETTINGS"
+fi
+grep -q '^[[:space:]]*-[[:space:]]*shellprocess@dclawos-postinstall[[:space:]]*$' "$SETTINGS" || {
+    echo "DclawOS: could not insert dclawos-postinstall after bootloader (sequence changed?)" >&2
+    exit 1
+}
+[ -s /etc/calamares/modules/dclawos-postinstall.conf ] || {
+    echo "DclawOS: dclawos-postinstall.conf missing" >&2
+    exit 1
+}
+[ -x /usr/local/libexec/dclawos-target-postinstall.sh ] || {
+    echo "DclawOS: target postinstall script missing or not executable" >&2
+    exit 1
+}
+
+# ---- warn-only: format-uncertain settings (gate re-checks leniently) ----
+if [ -f /etc/calamares/modules/bootloader.conf ]; then
+    if grep -q 'efiBootloaderId' /etc/calamares/modules/bootloader.conf; then
+        grep -q 'efiBootloaderId: *debian' /etc/calamares/modules/bootloader.conf || \
+            echo "DclawOS: bootloader efiBootloaderId is not 'debian' (Debian GRUB EFI hardcodes it; check)" >&2
+    fi
+fi
+if [ -f /etc/calamares/modules/displaymanager.conf ]; then
+    grep -qi 'lightdm' /etc/calamares/modules/displaymanager.conf || \
+        echo "DclawOS: displaymanager.conf does not mention lightdm (check the installed DM)" >&2
+fi
+if [ -f /etc/calamares/modules/unpackfs.conf ]; then
+    grep -q 'filesystem.squashfs' /etc/calamares/modules/unpackfs.conf || \
+        echo "DclawOS: unpackfs source does not mention filesystem.squashfs (verify against live-build layout; QEMU install test must cover)" >&2
+fi
+
+# ---- remove Debian's generic installer entries; keep only DclawOS ----
+rm -f /usr/share/applications/calamares.desktop \
+    /etc/xdg/autostart/calamares-desktop-icon.desktop 2>/dev/null || true
+
+# ---- locale for the installer UI (warn-only: fallback is English) ----
+if [ -f /etc/locale.gen ]; then
+    sed -i -E 's/^#[[:space:]]*(zh_CN.UTF-8[[:space:]]+UTF-8)/\1/' /etc/locale.gen
+    locale-gen zh_CN.UTF-8 2>/dev/null || \
+        echo "DclawOS: locale-gen zh_CN.UTF-8 failed (installer falls back to English)" >&2
+fi
+mkdir -p /etc/default
+cat > /etc/default/locale <<'EOF'
+LANG=zh_CN.UTF-8
+LANGUAGE=zh_CN:zh
+LC_MESSAGES=zh_CN.UTF-8
+EOF

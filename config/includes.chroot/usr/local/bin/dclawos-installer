@@ -1,0 +1,34 @@
+#!/bin/sh
+# DclawOS 2.0 live installer entry. Runs ONLY in the live session as
+# user dclaw. Adapted from the 1.0 wrapper (reference only): the 1.0
+# /home/user paths do not exist in 2.0, and its comment about a
+# sudoers rule "granting only this installer" is wrong for 2.0.
+set -eu
+
+if ! command -v calamares >/dev/null 2>&1; then
+    echo "Calamares is not installed in this DclawOS Live session." >&2
+    exit 1
+fi
+
+# Language: zh_CN.UTF-8, generated at build time by hook 1007 (the
+# locales package is in the desktop list). If generation ever fails,
+# these exports only produce locale warnings and Calamares falls back
+# to English; installation itself still works.
+export LANG=zh_CN.UTF-8
+export LANGUAGE=zh_CN:zh
+export LC_ALL=zh_CN.UTF-8
+
+# X session: inherited from the Openbox session; fall back to dclaw's
+# standard cookie path only when XAUTHORITY is unset. 2.0 has no
+# /home/user and no fixed .Xauthority-dclawos file.
+export DISPLAY="${DISPLAY:-:0}"
+if [ -z "${XAUTHORITY:-}" ] && [ -f "/home/dclaw/.Xauthority" ]; then
+    export XAUTHORITY=/home/dclaw/.Xauthority
+fi
+
+# Privilege: the live rule (/etc/sudoers.d/dclawos-live) gives dclaw
+# full NOPASSWD sudo, so sudo -n never prompts. If the rule is missing,
+# -n fails fast instead of hanging for a password — that is the
+# intended behavior. Do NOT replace this with pkexec: a bare Openbox
+# session has no polkit authentication agent, so pkexec would fail.
+exec /usr/bin/sudo -n -E /usr/bin/calamares "$@"

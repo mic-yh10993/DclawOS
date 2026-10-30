@@ -78,6 +78,16 @@ for path in \
     usr/local/bin/dclawos-monitor \
     usr/local/bin/dclawos-agent-run \
     usr/local/bin/dclawos-editor \
+    usr/bin/calamares \
+    etc/calamares/settings.conf \
+    usr/local/bin/dclawos-installer \
+    usr/share/applications/dclawos-installer.desktop \
+    etc/calamares/modules/dclawos-postinstall.conf \
+    usr/local/libexec/dclawos-target-postinstall.sh \
+    etc/calamares/branding/dclawos/branding.desc \
+    etc/calamares/branding/dclawos/show.qml \
+    etc/calamares/branding/dclawos/stylesheet.qss \
+    etc/calamares/branding/dclawos/dclawos-mark.svg \
     usr/local/lib/dclawos/modifiedfiles.py \
     usr/local/lib/dclawos/registrylib.py \
     usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.typelib \
@@ -266,6 +276,113 @@ grep -q 'connectors' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || 
 }
 grep -q 'build_secrets_panel' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
     echo "settings lacks secrets page" >&2
+    exit 1
+}
+# Phase 3 module 5: livecd installer (Calamares). Static checks only:
+# they prove the installer is packaged + wired + the live/installed
+# permission boundary is scripted — they do NOT claim an install
+# succeeds (that needs the QEMU install test, a follow-up).
+unsquashfs -d "$WORK/installer-extract" "$FS" usr/local/bin/dclawos-installer >/dev/null 2>&1
+sh -n "$WORK/installer-extract/usr/local/bin/dclawos-installer"
+grep -q 'sudo -n -E' "$WORK/installer-extract/usr/local/bin/dclawos-installer" || {
+    echo "installer wrapper must use sudo -n (no polkit agent on bare Openbox)" >&2
+    exit 1
+}
+if grep -q 'pkexec' "$WORK/installer-extract/usr/local/bin/dclawos-installer"; then
+    echo "installer wrapper must not use pkexec" >&2
+    exit 1
+fi
+if grep -q '/home/user' "$WORK/installer-extract/usr/local/bin/dclawos-installer"; then
+    echo "installer wrapper still references 1.0 /home/user paths" >&2
+    exit 1
+fi
+grep -q 'dclawos-installer' "$WORK/menu-extract/etc/xdg/openbox/menu.xml" || {
+    echo "desktop menu lacks the installer entry" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/calamares-extract" "$FS" etc/calamares/settings.conf etc/calamares/modules/dclawos-postinstall.conf usr/local/libexec/dclawos-target-postinstall.sh >/dev/null 2>&1
+grep -qE '^[[:space:]]*branding:[[:space:]]*dclawos[[:space:]]*$' "$WORK/calamares-extract/etc/calamares/settings.conf" || {
+    echo "calamares branding is not dclawos" >&2
+    exit 1
+}
+grep -q 'dontChroot: false' "$WORK/calamares-extract/etc/calamares/modules/dclawos-postinstall.conf" || {
+    echo "postinstall must run in the target chroot (dontChroot: false)" >&2
+    exit 1
+}
+# Exec-sequence order, line-based (no PyYAML in the image): the
+# postinstall must sit after users and after bootloader, before
+# umount when umount is present; packages must be gone (offline).
+awk '
+    /^[[:space:]]*-[[:space:]]*exec:[[:space:]]*$/ { in_exec=1; next }
+    in_exec && /^[[:space:]]*-[[:space:]]*[a-z]+:/ { in_exec=0 }
+    in_exec {
+        if ($0 ~ /^[[:space:]]*-[[:space:]]*users[[:space:]]*$/) users=NR
+        if ($0 ~ /^[[:space:]]*-[[:space:]]*bootloader[[:space:]]*$/) bootloader=NR
+        if ($0 ~ /shellprocess@dclawos-postinstall/) postinstall=NR
+        if ($0 ~ /^[[:space:]]*-[[:space:]]*umount[[:space:]]*$/) umount=NR
+        if ($0 ~ /^[[:space:]]*-[[:space:]]*packages[[:space:]]*$/) packages=NR
+    }
+    END {
+        if (!users || !postinstall) exit 2
+        if (postinstall < users) exit 3
+        if (bootloader && postinstall < bootloader) exit 4
+        if (umount && postinstall > umount) exit 5
+        if (packages) exit 6
+    }
+' "$WORK/calamares-extract/etc/calamares/settings.conf" || {
+    echo "calamares exec sequence order wrong (users < postinstall, bootloader < postinstall < umount, no packages)" >&2
+    exit 1
+}
+grep -q 'id: dclawos-postinstall' "$WORK/calamares-extract/etc/calamares/settings.conf" || {
+    echo "calamares instances lack dclawos-postinstall" >&2
+    exit 1
+}
+# Permission boundary, static double proof: the live rule must be
+# present in the image, and the postinstall must delete it + the
+# autologin file, without touching GDM (2.0 has none) or dclaw-agent.
+unsquashfs -d "$WORK/livesudo-extract" "$FS" etc/sudoers.d >/dev/null 2>&1
+grep -q 'dclaw ALL=(ALL) NOPASSWD: ALL' "$WORK/livesudo-extract/etc/sudoers.d/dclawos-live" || {
+    echo "live image lacks the NOPASSWD rule (live must escalate password-free)" >&2
+    exit 1
+}
+grep -q 'rm -f /etc/sudoers.d/dclawos-live' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh" || {
+    echo "postinstall does not delete the live sudoers rule" >&2
+    exit 1
+}
+grep -q '70-dclawos-autologin.conf' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh" || {
+    echo "postinstall does not cancel live autologin" >&2
+    exit 1
+}
+if grep -q 'gdm3' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh"; then
+    echo "postinstall must not reference gdm3 (2.0 uses LightDM)" >&2
+    exit 1
+fi
+if grep -q 'userdel.*dclaw-agent' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh"; then
+    echo "postinstall must not delete dclaw-agent" >&2
+    exit 1
+fi
+sh -n "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh"
+# Toolchain presence in the image (offline bootloader + unpackfs).
+for toolpath in usr/bin/unsquashfs usr/bin/rsync usr/sbin/parted; do
+    grep -q "$toolpath" "$LIST" || {
+        echo "installer toolchain missing from image: $toolpath" >&2
+        exit 1
+    }
+done
+grep -q 'calamares/modules/partition/libcalamares_viewmodule_partition.so' "$LIST" || {
+    echo "calamares partition module missing from image" >&2
+    exit 1
+}
+grep -q 'calamares/modules/mount/module.desc' "$LIST" || {
+    echo "calamares mount module missing from image" >&2
+    exit 1
+}
+grep -q 'grub/i386-pc/modinfo.sh' "$LIST" || {
+    echo "GRUB BIOS platform modules missing from image" >&2
+    exit 1
+}
+grep -q 'grub/x86_64-efi/modinfo.sh' "$LIST" || {
+    echo "GRUB EFI platform modules missing from image" >&2
     exit 1
 }
 unsquashfs -d "$WORK/agentunit-extract" "$FS" etc/systemd/system/dclawos-agent.service >/dev/null 2>&1

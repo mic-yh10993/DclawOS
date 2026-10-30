@@ -1,0 +1,36 @@
+---
+componentName: dclawos
+welcomeStyleCalamares: false
+welcomeExpandingLogo: true
+windowExpanding: normal
+windowSize: 1024px,650px
+windowPlacement: center
+sidebar: widget
+navigation: widget
+
+strings:
+    productName: DclawOS
+    shortProductName: DclawOS
+    version: "2.0"
+    shortVersion: "2.0"
+    versionedName: DclawOS 2.0
+    shortVersionedName: DclawOS 2.0
+    bootloaderEntryName: DclawOS
+    productUrl: https://github.com/mic-yh10993/DclawOS
+    supportUrl: https://github.com/mic-yh10993/DclawOS/issues
+    knownIssuesUrl: https://github.com/mic-yh10993/DclawOS/issues
+    releaseNotesUrl: https://github.com/mic-yh10993/DclawOS/releases
+
+images:
+    productIcon: "dclawos-mark.svg"
+    productLogo: "dclawos-mark.svg"
+    productWelcome: "dclawos-mark.svg"
+
+style:
+    sidebarBackground: "#082353"
+    sidebarText: "#EAF6FF"
+    sidebarTextSelect: "#07162F"
+    sidebarTextHighlight: "#75D6FF"
+
+slideshow: "show.qml"
+slideshowAPI: 2

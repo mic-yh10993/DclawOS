@@ -24,6 +24,18 @@ if [ -f "$MENU" ] && ! grep -q 'dclawos-chat' "$MENU" 2>/dev/null; then
     fi
 fi
 
+# Phase 3 module 5: installer entry (same warn-only append style).
+# Openbox menus are static and never read .desktop files, so the
+# .desktop file alone would not surface the installer.
+if [ -f "$MENU" ] && ! grep -q 'dclawos-installer' "$MENU" 2>/dev/null; then
+    if grep -q '</openbox_menu>' "$MENU" 2>/dev/null; then
+        sed -i 's|</openbox_menu>|<item label="安装 DclawOS"><action name="Execute"><command>dclawos-installer</command></action></item>\n</openbox_menu>|' "$MENU" 2>/dev/null \
+            || echo "dclawos-desktop-menu: installer menu insert failed (warn-only)" >&2
+    else
+        echo "dclawos-desktop-menu: no </openbox_menu> marker, installer skipped" >&2
+    fi
+fi
+
 RC=/etc/xdg/openbox/rc.xml
 if [ -f "$RC" ]; then
     sed -i 's|<command>dclawos-dashboard</command>|<command>dclawos-chat</command>|g' "$RC" 2>/dev/null || true

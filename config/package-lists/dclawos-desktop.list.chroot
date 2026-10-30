@@ -23,3 +23,30 @@ fonts-wqy-zenhei
 xterm
 xdotool
 chromium
+locales
+# Livecd installer (Phase 3 module 5): Calamares + Debian settings,
+# NOT a scripted installer (partitioning + bootloader + user setup
+# stay tested code). Qt5 cost is a live-medium cost, not a feature cut.
+calamares
+calamares-settings-debian
+qml-module-qtquick2
+qml-module-qtquick-controls2
+qml-module-qtquick-layouts
+qml-module-qtquick-window2
+# unpackfs + partitioning + bootloader tooling (bootloader module
+# calls local tools, it does not apt-install them).
+squashfs-tools
+rsync
+parted
+grub-common
+grub-pc-bin
+grub-efi-amd64-bin
+efibootmgr
+os-prober
+dosfstools
+ntfs-3g
+udisks2
+libblockdev-part2
+libblockdev-fs2
+mtools
+syslinux-utils
