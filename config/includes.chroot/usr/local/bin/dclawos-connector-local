@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Local connector adapter (Phase 3 module 2).
+
+A built-in connector command that proves the connector framework with
+real behaviour: it appends sent messages to a JSONL inbox file and can
+list them back. Register it in the settings GUI as a connector entry
+with command "dclawos-connector-local" and no args.
+
+Protocol: one JSON object on stdin, one JSON object on stdout.
+Actions:
+  {"action": "send", "message": "..."}  -> appends {ts, message} to the
+      inbox and returns {"ok": true, "count": <messages in inbox>}.
+  {"action": "inbox"}                 -> returns {"ok": true,
+      "messages": [{ts, message}, ...]} (newest last, capped at 100).
+Anything else -> {"ok": false, "error": ...}.
+
+The inbox path defaults to /var/lib/dclawos/connector-inbox.jsonl
+(group-shared so the human session and the agent service can both
+read it) and honours DCLAWOS_CONNECTOR_INBOX for tests. Messages are
+plain text; this adapter never handles credentials.
+"""
+
+import json
+import os
+import sys
+import time
+
+DEFAULT_INBOX = "/var/lib/dclawos/connector-inbox.jsonl"
+
+
+def inbox_path():
+    return os.environ.get("DCLAWOS_CONNECTOR_INBOX", DEFAULT_INBOX)
+
+
+def main():
+    try:
+        request = json.load(sys.stdin)
+    except ValueError:
+        print(json.dumps({"ok": False, "error": "invalid JSON input"}))
+        return 0
+    if not isinstance(request, dict):
+        print(json.dumps({"ok": False, "error": "request is not an object"}))
+        return 0
+    action = request.get("action")
+    path = inbox_path()
+    if action == "send":
+        message = request.get("message")
+        if not isinstance(message, str) or not message:
+            print(json.dumps({"ok": False,
+                              "error": "send needs a non-empty message"}))
+            return 0
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        count = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                count = sum(1 for _ in handle)
+        except FileNotFoundError:
+            count = 0
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"ts": int(time.time()),
+                                     "message": message},
+                                    ensure_ascii=False) + "\n")
+        print(json.dumps({"ok": True, "count": count + 1}))
+        return 0
+    if action == "inbox":
+        messages = []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        messages.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except FileNotFoundError:
+            messages = []
+        print(json.dumps({"ok": True, "messages": messages[-100:]}))
+        return 0
+    print(json.dumps({"ok": False, "error": f"unknown action: {action!r}"}))
+    return 0
+
+
+if __name__ == "__main__":
+    main()

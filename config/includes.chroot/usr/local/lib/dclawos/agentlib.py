@@ -74,7 +74,7 @@ TOOLS = (
     "shell", "read_file", "write_file", "list_files",
     "service_status", "service_restart", "package_install",
     "route_decide", "mcp_call", "skill_run", "subagent",
-    "takeover_request",
+    "takeover_request", "connector_send",
 )
 
 
@@ -280,7 +280,7 @@ def classify(tool, params):
         return 1, "shell commands are mutating by default"
     if tool in ("service_restart", "package_install"):
         return 1, "system mutation via broker"
-    if tool in ("mcp_call", "skill_run"):
+    if tool in ("mcp_call", "skill_run", "connector_send"):
         return 1, "third-party tool execution"
     if tool == "subagent":
         return 1, "child session execution"
@@ -328,6 +328,37 @@ def request_approval(tool, params, summary, ttl_seconds=600):
             return "expired", ticket["id"]
         time.sleep(2)
     return "timeout", ticket["id"]
+
+
+def broker_execute(ticket_id, operation, params):
+    """Send one ticketed operation to the privileged broker.
+
+    Shared by the agent daemon and GUI callers (settings secrets page):
+    the caller owns the approval (ticket already approved); this only
+    performs the socket round-trip and returns the broker reply dict.
+    Values passed as params are never logged here.
+    """
+    import socket
+    import ticketlib  # local import: ticketlib lives beside this module
+    request = json.dumps({"ticket_id": ticket_id, "operation": operation,
+                          "params": params}) + "\n"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(60)
+        sock.connect(ticketlib.socket_path())
+        sock.sendall(request.encode("utf-8"))
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        sock.close()
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {"ok": False, "error": "bad broker reply"}
 
 
 # -------------------------------------------------------------- secrets

@@ -26,6 +26,7 @@ Reuse notes (evaluation cards §3, step 0 retrieval):
 import json
 import os
 import sys
+import threading
 
 sys.path.insert(0, "/usr/local/lib/dclawos")
 sys.path.insert(0, os.path.join(
@@ -36,10 +37,15 @@ try:
 except ImportError:
     registrylib = None
 
+try:
+    import agentlib
+except ImportError:
+    agentlib = None
+
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gio  # noqa: E402
+from gi.repository import Gtk, Gio, GLib  # noqa: E402
 
 SCHEMA_ID = "org.dclawos.settings"
 CATALOG_PATH = "/usr/share/dclawos/engine/catalog.json"
@@ -68,6 +74,7 @@ class SettingsApp(Gtk.Window):
         stack.add_titled(self.build_general_panel(), "general", "通用")
         stack.add_titled(self.build_ai_panel(), "ai", "AI 与模型")
         stack.add_titled(self.build_skills_panel(), "skills", "Skills 与 MCP")
+        stack.add_titled(self.build_secrets_panel(), "secrets", "密钥")
 
     def labeled_row(self, label_text, widget):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -242,10 +249,10 @@ class SettingsApp(Gtk.Window):
         scrolled.add(box)
 
         note = Gtk.Label(
-            label="说明：Skills 与 MCP 在此统一管理（Q3，不走 TUI）。"
-                  "MCP 工具调用的审批走模块 5 票据 broker（agent 服务"
-                  "接入后生效）；MCP 环境变量本页不编辑（常为密钥，"
-                  "后续版本走 libsecret），但注册表格式已保留 env 字段。")
+            label="说明：Skills、MCP 与连接器在此统一管理（Q3，不走 TUI）。"
+                  "MCP/连接器调用的审批走票据 broker（agent 服务已接入）。"
+                  "MCP 环境变量不在此页编辑（常为密钥）：需要密钥时在"
+                  "「密钥」页保存，注册表 env 写 secret:<名称> 引用。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         box.pack_start(note, False, False, 0)
@@ -279,6 +286,19 @@ class SettingsApp(Gtk.Window):
              ("切换启用", self.on_toggle_server))),
             False, False, 0)
         self.servers_scroll = servers_scroll
+
+        self.connectors_store, connectors_scroll = self._registry_tree(
+            ("名称", "ID", "命令与参数", "启用", "许可证"), (0, 2))
+        connectors_label = Gtk.Label(label="连接器")
+        connectors_label.set_halign(Gtk.Align.START)
+        box.pack_start(connectors_label, False, False, 0)
+        box.pack_start(connectors_scroll, True, True, 0)
+        box.pack_start(self._registry_buttons(
+            (("添加连接器", self.on_add_connector),
+             ("删除连接器", self.on_remove_connector),
+             ("切换启用", self.on_toggle_connector))),
+            False, False, 0)
+        self.connectors_scroll = connectors_scroll
 
         self.refresh_registry()
         return scrolled
@@ -320,6 +340,7 @@ class SettingsApp(Gtk.Window):
             self.registry_status.set_text(f"注册表读取失败：{exc}")
             self.skills_store.clear()
             self.servers_store.clear()
+            self.connectors_store.clear()
             return
         self.skills_store.clear()
         for entry in data["skills"]:
@@ -337,8 +358,18 @@ class SettingsApp(Gtk.Window):
                 entry.get("name", ""), entry.get("id", ""), shown,
                 "是" if entry.get("enabled") else "否",
                 entry.get("license", "")))
+        self.connectors_store.clear()
+        for entry in data["connectors"]:
+            command = entry.get("command", "")
+            args = " ".join(entry.get("args", []))
+            shown = f"{command} {args}".strip()
+            self.connectors_store.append((
+                entry.get("name", ""), entry.get("id", ""), shown,
+                "是" if entry.get("enabled") else "否",
+                entry.get("license", "")))
         status = (f"Skills {len(data['skills'])} 个，"
-                  f"MCP 服务器 {len(data['mcp_servers'])} 个")
+                  f"MCP 服务器 {len(data['mcp_servers'])} 个，"
+                  f"连接器 {len(data['connectors'])} 个")
         if skipped:
             status += f"（{skipped} 条无效记录已跳过）"
         self.registry_status.set_text(status)
@@ -372,7 +403,9 @@ class SettingsApp(Gtk.Window):
 
     def _add_dialog(self, kind):
         """Add-entry dialog loop. Returns True if something was added."""
-        title = "添加 Skill" if kind == "skill" else "添加 MCP 服务器"
+        titles = {"skill": "添加 Skill", "server": "添加 MCP 服务器",
+                  "connector": "添加连接器"}
+        title = titles.get(kind, "添加")
         dialog = Gtk.Dialog(title=title, transient_for=self,
                             flags=Gtk.DialogFlags.MODAL)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
@@ -411,8 +444,10 @@ class SettingsApp(Gtk.Window):
                 data, _skipped = registrylib.load_registry()
                 if kind == "skill":
                     registrylib.add_skill(data, entry)
-                else:
+                elif kind == "server":
                     registrylib.add_server(data, entry)
+                else:
+                    registrylib.add_connector(data, entry)
                 registrylib.save_registry(data)
             except ValueError as exc:
                 self._error(f"添加失败：{exc}")
@@ -430,19 +465,107 @@ class SettingsApp(Gtk.Window):
     def on_add_server(self, _button):
         self._add_dialog("server")
 
+    def on_add_connector(self, _button):
+        self._add_dialog("connector")
+
+    def build_secrets_panel(self):
+        """Secret store page (Phase 3 module 2).
+
+        Writes go through the privileged broker's write-secret op,
+        gated by a ticket (approval popup or full-access auto-approval)
+        — the same gate the agent service uses. Values are never shown
+        back, never logged, and never stored in the registry: the
+        registry env references them as secret:<name>.
+
+        Why files, not libsecret: the agent service runs as the
+        dclaw-agent system user, which has no login session and no
+        unlocked keyring; a root broker cannot unlock the human user's
+        keyring either. Broker-written 0600 files owned by dclaw-agent
+        are the equivalent store for a service user.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(12)
+        if agentlib is None:
+            label = Gtk.Label(label="agentlib 不可用，无法保存密钥。")
+            label.set_line_wrap(True)
+            label.set_halign(Gtk.Align.START)
+            box.pack_start(label, False, False, 0)
+            return box
+        note = Gtk.Label(
+            label="说明：密钥只写不读，保存后无法查看原文，只能被 agent "
+                  "服务通过 secret:<名称> 引用。保存需要审批（弹出审批"
+                  "窗口确认，或开启完全访问后自动通过）。")
+        note.set_line_wrap(True)
+        note.set_halign(Gtk.Align.START)
+        box.pack_start(note, False, False, 0)
+        self.secret_name = Gtk.Entry()
+        box.pack_start(self.labeled_row("名称（小写字母/数字/_/-）：",
+                                        self.secret_name), False, False, 0)
+        self.secret_value = Gtk.Entry()
+        self.secret_value.set_visibility(False)
+        box.pack_start(self.labeled_row("密钥值：", self.secret_value),
+                       False, False, 0)
+        self.secret_status = Gtk.Label(label="")
+        self.secret_status.set_halign(Gtk.Align.START)
+        self.secret_status.set_line_wrap(True)
+        box.pack_start(self.secret_status, False, False, 0)
+        save_btn = Gtk.Button(label="保存密钥（需审批）")
+        save_btn.connect("clicked", self.on_save_secret)
+        box.pack_start(save_btn, False, False, 0)
+        return box
+
+    def on_save_secret(self, _button):
+        name = self.secret_name.get_text().strip()
+        value = self.secret_value.get_text()
+        if not name or not value:
+            self.secret_status.set_text("名称与密钥值都不能为空。")
+            return
+        self.secret_status.set_text("等待审批……")
+        self.secret_value.set_text("")
+
+        def work():
+            # The broker validates the ticket by params hash, so the
+            # approval params and the execution params must be the
+            # identical dict (same as dclawos-secret). The value lives
+            # only in this process's memory; the ticket stores a hash.
+            params = {"name": name, "value": value}
+            try:
+                verdict, ticket_id = agentlib.request_approval(
+                    "write-secret", params,
+                    f"保存密钥 {name}")
+                if verdict != "approved":
+                    GLib.idle_add(self.secret_status.set_text,
+                                  f"未保存：审批结果 {verdict}。")
+                    return
+                reply = agentlib.broker_execute(
+                    ticket_id, "write-secret", params)
+                if reply.get("ok"):
+                    GLib.idle_add(self.secret_status.set_text,
+                                  f"密钥 {name} 已保存。")
+                else:
+                    GLib.idle_add(self.secret_status.set_text,
+                                  f"保存失败：{reply.get('error')}")
+            except Exception as exc:  # noqa: BLE001 - surface to the user
+                GLib.idle_add(self.secret_status.set_text,
+                              f"保存失败：{exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _remove_selected(self, kind, tree):
         entry_id = self._selected_id(tree)
         if entry_id is None:
             self._error("请先选择一行")
             return
-        label = "Skill" if kind == "skill" else "MCP 服务器"
+        labels = {"skill": "Skill", "server": "MCP 服务器",
+                  "connector": "连接器"}
+        keys = {"skill": "skills", "server": "mcp_servers",
+                "connector": "connectors"}
+        label = labels.get(kind, kind)
         if not self._confirm(f"确定删除{label} {entry_id} 吗？"):
             return
         try:
             data, _skipped = registrylib.load_registry()
-            registrylib.remove_entry(
-                data, "skills" if kind == "skill" else "mcp_servers",
-                entry_id)
+            registrylib.remove_entry(data, keys[kind], entry_id)
             registrylib.save_registry(data)
         except ValueError as exc:
             self._error(f"删除失败：{exc}")
@@ -455,6 +578,9 @@ class SettingsApp(Gtk.Window):
     def on_remove_server(self, _button):
         self._remove_selected("server", self.servers_scroll.get_child())
 
+    def on_remove_connector(self, _button):
+        self._remove_selected("connector", self.connectors_scroll.get_child())
+
     def _toggle_selected(self, kind, tree):
         entry_id = self._selected_id(tree)
         if entry_id is None:
@@ -462,7 +588,8 @@ class SettingsApp(Gtk.Window):
             return
         try:
             data, _skipped = registrylib.load_registry()
-            key = "skills" if kind == "skill" else "mcp_servers"
+            key = {"skill": "skills", "server": "mcp_servers",
+                   "connector": "connectors"}[kind]
             current = None
             for entry in data[key]:
                 if entry.get("id") == entry_id:
@@ -483,6 +610,10 @@ class SettingsApp(Gtk.Window):
 
     def on_toggle_server(self, _button):
         self._toggle_selected("server", self.servers_scroll.get_child())
+
+    def on_toggle_connector(self, _button):
+        self._toggle_selected("connector",
+                              self.connectors_scroll.get_child())
 
 
 def main():

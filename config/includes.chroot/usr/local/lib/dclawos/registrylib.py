@@ -113,6 +113,25 @@ def normalize_server(entry):
     return normalized
 
 
+# Phase 3 module 2: connectors are a third registry category, with the
+# same entry shape as MCP servers (id/name/command required, optional
+# args/env/description/license/enabled). A connector is a command-based
+# channel adapter: the agent service sends it JSON on stdin
+# ({action: "send", message}) and reads JSON on stdout. Unknown fields
+# round-trip like the other categories.
+def normalize_connector(entry):
+    normalized = _normalize(
+        entry, ("id", "name", "command"),
+        {"args": [], "env": {}, "description": "", "license": "",
+         "enabled": True})
+    if not isinstance(normalized["args"], list) or not all(
+            isinstance(a, str) for a in normalized["args"]):
+        raise ValueError("connector 'args' must be a list of strings")
+    if not isinstance(normalized["env"], dict):
+        raise ValueError("connector 'env' must be an object")
+    return normalized
+
+
 def load_registry(path=None):
     if path is None:
         path = registry_path()
@@ -120,15 +139,16 @@ def load_registry(path=None):
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
-        return {"skills": [], "mcp_servers": []}, 0
+        return {"skills": [], "mcp_servers": [], "connectors": []}, 0
     except (OSError, ValueError) as exc:
         raise ValueError(f"registry unreadable: {exc}")
     if not isinstance(data, dict):
         raise ValueError("registry root is not an object")
-    result = {"skills": [], "mcp_servers": []}
+    result = {"skills": [], "mcp_servers": [], "connectors": []}
     skipped = 0
     for kind, normalizer in (("skills", normalize_skill),
-                             ("mcp_servers", normalize_server)):
+                             ("mcp_servers", normalize_server),
+                             ("connectors", normalize_connector)):
         entries = data.get(kind, [])
         if not isinstance(entries, list):
             raise ValueError(f"registry field {kind!r} is not a list")
@@ -173,6 +193,15 @@ def add_server(data, entry):
         raise ValueError(
             f"mcp server id already exists: {normalized['id']!r}")
     data["mcp_servers"].append(normalized)
+    return normalized
+
+
+def add_connector(data, entry):
+    normalized = normalize_connector(entry)
+    if _find(data, "connectors", normalized["id"]) is not None:
+        raise ValueError(
+            f"connector id already exists: {normalized['id']!r}")
+    data["connectors"].append(normalized)
     return normalized
 
 

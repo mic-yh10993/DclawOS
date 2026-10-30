@@ -1,16 +1,23 @@
 #!/bin/sh
-# DclawOS desktop integration (Phase 2 module 2): right-click "ask AI"
-# and anytime chat summon. Warn-only: the Openbox packaged configs are
-# edited in place (append, never replace), and any mismatch skips with a
-# warning instead of failing the image build.
-#   - Right-click desktop -> "向 AI 提问" opens the AI dashboard.
-#   - Super+Space summons the AI dashboard (chat page) anytime.
+# DclawOS desktop integration (Phase 2 module 2, retargeted Phase 3
+# module 2): right-click "ask AI" and anytime chat summon. Warn-only:
+# the Openbox packaged configs are edited in place (append, never
+# replace), and any mismatch skips with a warning instead of failing
+# the image build.
+#   - Right-click desktop -> "向 AI 提问" opens the AI chat window.
+#   - Super+Space summons the AI chat window anytime.
+# The dashboard stays the autostarted default desktop; the chat window
+# links back to it ("打开看板").
 set -eu
 
 MENU=/etc/xdg/openbox/menu.xml
-if [ -f "$MENU" ] && ! grep -q 'dclawos-dashboard' "$MENU" 2>/dev/null; then
+if [ -f "$MENU" ]; then
+    # Retarget a stale dashboard entry from an earlier hook run.
+    sed -i 's|<command>dclawos-dashboard</command>|<command>dclawos-chat</command>|g' "$MENU" 2>/dev/null || true
+fi
+if [ -f "$MENU" ] && ! grep -q 'dclawos-chat' "$MENU" 2>/dev/null; then
     if grep -q '</openbox_menu>' "$MENU" 2>/dev/null; then
-        sed -i 's|</openbox_menu>|<item label="向 AI 提问"><action name="Execute"><command>dclawos-dashboard</command></action></item>\n</openbox_menu>|' "$MENU" 2>/dev/null \
+        sed -i 's|</openbox_menu>|<item label="向 AI 提问"><action name="Execute"><command>dclawos-chat</command></action></item>\n</openbox_menu>|' "$MENU" 2>/dev/null \
             || echo "dclawos-desktop-menu: menu insert failed (warn-only)" >&2
     else
         echo "dclawos-desktop-menu: no </openbox_menu> marker, skipped" >&2
@@ -18,9 +25,12 @@ if [ -f "$MENU" ] && ! grep -q 'dclawos-dashboard' "$MENU" 2>/dev/null; then
 fi
 
 RC=/etc/xdg/openbox/rc.xml
-if [ -f "$RC" ] && ! grep -q 'dclawos-dashboard' "$RC" 2>/dev/null; then
+if [ -f "$RC" ]; then
+    sed -i 's|<command>dclawos-dashboard</command>|<command>dclawos-chat</command>|g' "$RC" 2>/dev/null || true
+fi
+if [ -f "$RC" ] && ! grep -q 'dclawos-chat' "$RC" 2>/dev/null; then
     if grep -q '</keyboard>' "$RC" 2>/dev/null && ! grep -q 'W-space' "$RC" 2>/dev/null; then
-        sed -i 's|</keyboard>|<keybind key="W-space"><action name="Execute"><command>dclawos-dashboard</command></action></keybind>\n</keyboard>|' "$RC" 2>/dev/null \
+        sed -i 's|</keyboard>|<keybind key="W-space"><action name="Execute"><command>dclawos-chat</command></action></keybind>\n</keyboard>|' "$RC" 2>/dev/null \
             || echo "dclawos-desktop-menu: keybind insert failed (warn-only)" >&2
     else
         echo "dclawos-desktop-menu: keyboard section unsuitable, skipped" >&2

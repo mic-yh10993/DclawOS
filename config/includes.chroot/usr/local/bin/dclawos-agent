@@ -13,7 +13,7 @@ pretending an LLM answered it.
 Tools (see agentlib.classify for the approval tier of each):
   shell, read_file, write_file, list_files, service_status,
   service_restart, package_install, route_decide, mcp_call,
-  skill_run, subagent, takeover_request.
+  skill_run, subagent, takeover_request, connector_send.
 Privileged operations go through the ticket broker (root daemon):
 the service never runs sudo itself and never holds privileges.
 
@@ -41,7 +41,6 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
 
 import agentlib  # noqa: E402
-import ticketlib  # noqa: E402
 
 POLL_SECONDS = 2
 SHELL_TIMEOUT_DEFAULT = 120
@@ -51,30 +50,6 @@ READ_SIZE_CAP = 1024 * 1024
 
 def log(msg):
     print(f"dclawos-agent: {msg}", flush=True)
-
-
-def _broker_execute(ticket_id, operation, params):
-    """Execute one ticketed broker op. Returns the broker reply dict."""
-    import socket
-    request = json.dumps({"ticket_id": ticket_id, "operation": operation,
-                          "params": params}) + "\n"
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(60)
-        sock.connect(ticketlib.socket_path())
-        sock.sendall(request.encode("utf-8"))
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        sock.close()
-    try:
-        return json.loads(data.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return {"ok": False, "error": "broker reply not valid JSON"}
 
 
 def _run_shell(params):
@@ -134,7 +109,7 @@ def _list_files(params):
 
 
 def _broker_tool(ticket_id, operation, params):
-    reply = _broker_execute(ticket_id, operation, params)
+    reply = agentlib.broker_execute(ticket_id, operation, params)
     if not reply.get("ok"):
         raise ValueError(f"broker refused: {reply.get('error')}")
     return reply.get("result")
@@ -239,6 +214,10 @@ def execute_step(task, step):
     if tool == "skill_run":
         import skills
         return skills.run_skill(params, ticket_id)
+    if tool == "connector_send":
+        import connectorlib
+        return connectorlib.send_message(
+            params.get("connector", ""), params.get("message", ""))
     if tool == "subagent":
         return _subagent(params, task)
     if tool == "takeover_request":

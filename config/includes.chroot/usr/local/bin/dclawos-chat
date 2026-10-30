@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""DclawOS chat window (Phase 3 module 2): task assignment + console.
+
+This is the AI chat page the user can summon at any time (right-click
+"向 AI 提问", Super+Space). It is NOT a fake LLM chat: DclawOS has no
+model call path yet, so the window never invents model replies. What
+it does, honestly:
+
+- Plain text: creates a task (title + goal) in the agent queue. The
+  service runs it when it has steps; a message with no steps is
+  recorded honestly as "no steps to execute" and shown as such.
+- Slash commands create real one-step tasks that the agent service
+  executes through the tiered approval system:
+    /run <argv...>        shell step (argv split, no shell=True)
+    /read <path>          read_file step
+    /write <path> <text>  write_file step (inside agent workspace)
+    /skill <id> [input]   skill_run step
+    /mcp <server> <tool> [json-args]   mcp_call step
+    /connector <id> <message>          connector_send step
+    /route                route_decide step
+    /subagent <goal>      subagent step (child task, waited on)
+    /takeover <kind> <message>         takeover_request step
+    /stop                 stop the agent service (via dclawos-agent-ctl)
+- 指派任务 (Assign task) opens a dialog: title + goal + steps as a
+  JSON array, so multi-step tasks can be assigned from the GUI.
+- The window polls the task queue and the event stream and shows
+  status + results for the tasks it created, plus service events.
+
+A task result that says "no steps" is a real state, not a failure:
+it means the message was queued for a future model step. When a
+provider is configured (settings AI panel + secrets page), a later
+phase can attach model steps to plain messages; until then the UI
+says so in its header note.
+
+// reuse-check: OpenClaw chat UI is a web page with a message list
+  and input box; only that interaction PATTERN (messages + input +
+  task creation) is reused. No OpenClaw UI code is copied: this is a
+  native GTK3 window over the DclawOS task queue.
+"""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+try:
+    import agentlib
+except ImportError:
+    agentlib = None
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+POLL_MS = 1000
+
+HELP_TEXT = (
+    "命令：/run /read /write /skill /mcp /connector /route "
+    "/subagent /takeover /stop；普通文字创建任务（无步骤时如实记录）。"
+)
+
+
+class ChatWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-chat — AI 聊天")
+        self.set_default_size(760, 520)
+        self.known_tasks = {}  # task id -> last known status
+        self.shown_events = 0
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        note = Gtk.Label(
+            label="AI 聊天：指派任务与工具控制台。大模型对话尚未接入——"
+                  "普通消息会创建任务并如实记录（无步骤时不伪造回答）。"
+                  "供应商配置好后，消息可转为模型步骤。")
+        note.set_line_wrap(True)
+        note.set_halign(Gtk.Align.START)
+        box.pack_start(note, False, False, 0)
+
+        self.status = Gtk.Label(label="")
+        self.status.set_halign(Gtk.Align.START)
+        box.pack_start(self.status, False, False, 0)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC,
+                            Gtk.PolicyType.AUTOMATIC)
+        self.view = Gtk.TextView()
+        self.view.set_editable(False)
+        self.view.set_cursor_visible(False)
+        self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        scrolled.add(self.view)
+        box.pack_start(scrolled, True, True, 0)
+        self.buffer = self.view.get_buffer()
+
+        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                            spacing=6)
+        self.entry = Gtk.Entry()
+        self.entry.set_placeholder_text("输入消息或 /命令……（/help 看命令）")
+        self.entry.connect("activate", self.on_send)
+        entry_row.pack_start(self.entry, True, True, 0)
+        send_btn = Gtk.Button(label="发送")
+        send_btn.connect("clicked", self.on_send)
+        entry_row.pack_start(send_btn, False, False, 0)
+        box.pack_start(entry_row, False, False, 0)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        assign_btn = Gtk.Button(label="指派任务…")
+        assign_btn.connect("clicked", self.on_assign)
+        btn_row.pack_start(assign_btn, False, False, 0)
+        dash_btn = Gtk.Button(label="打开看板")
+        dash_btn.connect("clicked", self._launch, "dclawos-dashboard")
+        btn_row.pack_start(dash_btn, False, False, 0)
+        mon_btn = Gtk.Button(label="监视 AI")
+        mon_btn.connect("clicked", self._launch, "dclawos-monitor")
+        btn_row.pack_start(mon_btn, False, False, 0)
+        set_btn = Gtk.Button(label="设置")
+        set_btn.connect("clicked", self._launch, "dclawos-settings")
+        btn_row.pack_start(set_btn, False, False, 0)
+        box.pack_start(btn_row, False, False, 0)
+
+        self.append_line("系统：聊天窗口已就绪。" + HELP_TEXT)
+        GLib.timeout_add(POLL_MS, self.poll)
+
+    def _launch(self, _button, command):
+        try:
+            subprocess.Popen([command])
+        except OSError as exc:
+            self.append_line(f"系统：启动 {command} 失败：{exc}")
+
+    def append_line(self, text):
+        end = self.buffer.get_end_iter()
+        self.buffer.insert(end, text + "\n")
+        mark = self.buffer.create_mark(None, self.buffer.get_end_iter(),
+                                       False)
+        self.view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
+
+    # ------------------------------------------------------------ tasks
+
+    def create_task(self, title, goal, steps):
+        if agentlib is None:
+            self.append_line("系统：agentlib 不可用，无法创建任务。")
+            return None
+        try:
+            task = agentlib.new_task(title, goal, steps)
+            agentlib.save_task(task)
+        except (OSError, ValueError) as exc:
+            self.append_line(f"系统：创建任务失败：{exc}")
+            return None
+        self.known_tasks[task["id"]] = task["status"]
+        self.append_line(f"你：{title}")
+        return task
+
+    def parse_command(self, text):
+        """Parse a /command line into (title, goal, steps) or None."""
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self.append_line(f"系统：命令解析失败：{exc}")
+            return None
+        if not parts:
+            return None
+        cmd, args = parts[0], parts[1:]
+        if cmd == "/help":
+            self.append_line("系统：" + HELP_TEXT)
+            return None
+        if cmd == "/stop":
+            try:
+                subprocess.Popen(["dclawos-agent-ctl", "stop"])
+                self.append_line("系统：已请求停止 agent 服务。")
+            except OSError as exc:
+                self.append_line(f"系统：停止失败：{exc}")
+            return None
+        if cmd == "/run" and args:
+            return ("shell 命令", " ".join(args),
+                    [{"tool": "shell", "params": {"argv": args}}])
+        if cmd == "/read" and len(args) == 1:
+            return ("读取文件", args[0],
+                    [{"tool": "read_file", "params": {"path": args[0]}}])
+        if cmd == "/write" and len(args) >= 2:
+            path = args[0]
+            raw = text.split(None, 2)
+            content = raw[2] if len(raw) > 2 else ""
+            return ("写入文件", path,
+                    [{"tool": "write_file",
+                      "params": {"path": path, "content": content}}])
+        if cmd == "/skill" and args:
+            raw = text.split(None, 2)
+            return ("运行 Skill", args[0],
+                    [{"tool": "skill_run",
+                      "params": {"skill": args[0],
+                                 "input": raw[2] if len(raw) > 2 else ""}}])
+        if cmd == "/mcp" and len(args) >= 2:
+            raw = text.split(None, 3)
+            try:
+                call_args = json.loads(raw[3]) if len(raw) > 3 else {}
+            except ValueError as exc:
+                self.append_line(f"系统：mcp 参数不是合法 JSON：{exc}")
+                return None
+            return ("调用 MCP", f"{args[0]}.{args[1]}",
+                    [{"tool": "mcp_call",
+                      "params": {"server": args[0], "tool": args[1],
+                                 "arguments": call_args}}])
+        if cmd == "/connector" and len(args) >= 2:
+            raw = text.split(None, 2)
+            return ("发送连接器消息", args[0],
+                    [{"tool": "connector_send",
+                      "params": {"connector": args[0],
+                                 "message": raw[2] if len(raw) > 2 else ""}}])
+        if cmd == "/route":
+            return ("路由决策", "route_decide",
+                    [{"tool": "route_decide", "params": {}}])
+        if cmd == "/subagent" and args:
+            goal = text.split(None, 1)[1]
+            return ("指派子代理", goal,
+                    [{"tool": "subagent",
+                      "params": {"goal": goal, "steps": []}}])
+        if cmd == "/takeover" and len(args) >= 2:
+            raw = text.split(None, 2)
+            return ("请求人工接管", args[0],
+                    [{"tool": "takeover_request",
+                      "params": {"kind": args[0],
+                                 "message": raw[2] if len(raw) > 2 else ""}}])
+        self.append_line(f"系统：未知或参数不足的命令：{cmd}（/help 看列表）")
+        return None
+
+    def on_send(self, _widget):
+        text = self.entry.get_text().strip()
+        if not text:
+            return
+        self.entry.set_text("")
+        if text.startswith("/"):
+            parsed = self.parse_command(text)
+            if parsed is not None:
+                self.create_task(*parsed)
+        else:
+            self.create_task(text[:80], text, [])
+
+    def on_assign(self, _button):
+        dialog = Gtk.Dialog(title="指派任务", transient_for=self,
+                            flags=Gtk.DialogFlags.MODAL)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("创建", Gtk.ResponseType.OK)
+        area = dialog.get_content_area()
+        area.set_border_width(8)
+        title_entry = Gtk.Entry()
+        area.pack_start(Gtk.Label(label="标题："), False, False, 0)
+        area.pack_start(title_entry, False, False, 0)
+        goal_entry = Gtk.Entry()
+        area.pack_start(Gtk.Label(label="目标："), False, False, 0)
+        area.pack_start(goal_entry, False, False, 0)
+        steps_view = Gtk.TextView()
+        steps_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        steps_scroll = Gtk.ScrolledWindow()
+        steps_scroll.set_min_content_height(120)
+        steps_scroll.add(steps_view)
+        area.pack_start(
+            Gtk.Label(label="步骤（JSON 数组，如 "
+                            '[{"tool": "shell", "params": {"argv": '
+                            '["ls"]}}]）：'), False, False, 0)
+        area.pack_start(steps_scroll, True, True, 0)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            title = title_entry.get_text().strip() or "指派任务"
+            goal = goal_entry.get_text().strip()
+            steps_text = steps_view.get_buffer().get_text(
+                steps_view.get_buffer().get_start_iter(),
+                steps_view.get_buffer().get_end_iter(), True).strip()
+            try:
+                steps = json.loads(steps_text) if steps_text else []
+                if not isinstance(steps, list):
+                    raise ValueError("步骤必须是 JSON 数组")
+            except ValueError as exc:
+                self.append_line(f"系统：步骤 JSON 无效：{exc}")
+                dialog.destroy()
+                return
+            self.create_task(title, goal, steps)
+        dialog.destroy()
+
+    # ------------------------------------------------------------ poll
+
+    def poll(self):
+        if agentlib is None:
+            return True
+        try:
+            tasks = agentlib.list_tasks()
+        except (OSError, ValueError):
+            tasks = []
+        counts = {"queued": 0, "running": 0, "done": 0, "failed": 0,
+                  "cancelled": 0}
+        for task in tasks:
+            counts[task.get("status", "?")] = \
+                counts.get(task.get("status", "?"), 0) + 1
+            tid = task["id"]
+            status = task.get("status")
+            if tid in self.known_tasks and \
+                    self.known_tasks[tid] != status and \
+                    status in ("done", "failed", "cancelled"):
+                result = task.get("result") or task.get("error") or ""
+                shown = json.dumps(result, ensure_ascii=False)[:400]
+                self.append_line(
+                    f"任务完成 [{task.get('title', tid)}] {status}：{shown}")
+            self.known_tasks[tid] = status
+        self.status.set_text(
+            f"队列：{counts.get('queued', 0)} 等待，"
+            f"{counts.get('running', 0)} 运行中，"
+            f"{counts.get('done', 0)} 完成，"
+            f"{counts.get('failed', 0)} 失败。")
+        try:
+            with open(agentlib.events_path(), "r",
+                      encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except OSError:
+            lines = []
+        for line in lines[self.shown_events:]:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("type") in ("approval", "takeover"):
+                self.append_line(
+                    f"事件 [{event.get('type')}] "
+                    f"{event.get('summary', '')}")
+        self.shown_events = len(lines)
+        return True
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-chat (creates tasks for dclawos-agent)")
+        return 0
+    log = print
+    log("dclawos-chat started (Phase 3 module 2: chat + task assignment)")
+    win = ChatWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

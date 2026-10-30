@@ -67,9 +67,12 @@ for path in \
     usr/local/bin/dclawos-agent \
     usr/local/bin/dclawos-approve \
     usr/local/bin/dclawos-secret \
+    usr/local/bin/dclawos-chat \
+    usr/local/bin/dclawos-connector-local \
     usr/local/lib/dclawos/agentlib.py \
     usr/local/lib/dclawos/mcpclient.py \
     usr/local/lib/dclawos/skills.py \
+    usr/local/lib/dclawos/connectorlib.py \
     etc/systemd/system/dclawos-agent.service \
     etc/systemd/system/multi-user.target.wants/dclawos-agent.service \
     usr/local/bin/dclawos-monitor \
@@ -212,19 +215,41 @@ grep -q 'WantedBy=multi-user.target' "$WORK/privunit-extract/etc/systemd/system/
 # + shared agent lib + agent unit (enabled by hook 1006). The daemon
 # itself needs a live session to run tasks, so the gate checks
 # presence + syntax + unit wiring, not behavior.
-for tool in dclawos-agent dclawos-approve dclawos-secret; do
+for tool in dclawos-agent dclawos-approve dclawos-secret dclawos-chat \
+    dclawos-connector-local; do
     unsquashfs -d "$WORK/${tool}-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
     test -x "$WORK/${tool}-extract/usr/local/bin/${tool}"
     python3 -m py_compile "$WORK/${tool}-extract/usr/local/bin/${tool}"
 done
 unsquashfs -d "$WORK/agentlib-extract" "$FS" usr/local/lib/dclawos/agentlib.py >/dev/null 2>&1
 python3 -m py_compile "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py"
-for lib in mcpclient skills; do
+for lib in mcpclient skills connectorlib; do
     unsquashfs -d "$WORK/${lib}-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
     python3 -m py_compile "$WORK/${lib}-extract/usr/local/lib/dclawos/${lib}.py"
 done
 grep -q 'classify' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
     echo "agent lib lacks approval classification" >&2
+    exit 1
+}
+grep -q 'connector_send' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
+    echo "agent lib lacks connector_send tool" >&2
+    exit 1
+}
+# Phase 3 module 2: chat summon target + settings connectors/secrets
+# pages. The hook retargets menu + keybind to dclawos-chat; the gate
+# reads the packaged Openbox configs from the image.
+unsquashfs -d "$WORK/menu-extract" "$FS" etc/xdg/openbox/menu.xml >/dev/null 2>&1
+grep -q 'dclawos-chat' "$WORK/menu-extract/etc/xdg/openbox/menu.xml" || {
+    echo "desktop menu does not summon the chat window" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/settings-extract" "$FS" usr/local/bin/dclawos-settings >/dev/null 2>&1
+grep -q 'connectors' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks connectors management" >&2
+    exit 1
+}
+grep -q 'build_secrets_panel' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings lacks secrets page" >&2
     exit 1
 }
 unsquashfs -d "$WORK/agentunit-extract" "$FS" etc/systemd/system/dclawos-agent.service >/dev/null 2>&1
