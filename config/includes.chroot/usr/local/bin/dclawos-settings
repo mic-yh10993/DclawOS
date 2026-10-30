@@ -110,6 +110,26 @@ class SettingsApp(Gtk.Window):
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         box.pack_start(note, False, False, 0)
+
+        # Phase 3 module 4: full-access toggle. The agent service reads
+        # this key (agentlib.full_access_enabled); the GUI only writes
+        # it — the service never writes its own permission.
+        fa_switch = Gtk.Switch()
+        fa_switch.set_active(self.settings.get_boolean("agent-full-access"))
+        fa_switch.connect(
+            "notify::active",
+            lambda sw, _pspec: self.settings.set_boolean(
+                "agent-full-access", sw.get_active()))
+        box.pack_start(
+            self.labeled_row("Agent 完全访问（无限制）", fa_switch),
+            False, False, 0)
+        fa_note = Gtk.Label(
+            label="警告：开启后 agent 的所有工具调用（含删文件、工作区外"
+                  "操作、装软件）不再弹窗等待人工批准，自动通过；但每次"
+                  "调用仍会创建票据并记入事件日志。默认关闭。")
+        fa_note.set_line_wrap(True)
+        fa_note.set_halign(Gtk.Align.START)
+        box.pack_start(fa_note, False, False, 0)
         return box
 
     def load_catalog(self):

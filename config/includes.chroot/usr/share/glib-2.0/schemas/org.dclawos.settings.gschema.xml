@@ -47,5 +47,15 @@
       <description>Auto lets the routing engine choose provider/model;
       manual pins ai-provider/ai-model.</description>
     </key>
+    <key name="agent-full-access" type="b">
+      <default>false</default>
+      <summary>Agent full access (unrestricted)</summary>
+      <description>Phase 3 module 4: when true, the agent service
+      auto-approves every approval ticket (including destructive and
+      out-of-workspace operations) instead of waiting for the human
+      approval popup. Tickets are still created and logged, so the
+      audit trail stays complete. Default false: every tier 1/2 tool
+      call waits for human approval.</description>
+    </key>
   </schema>
 </schemalist>

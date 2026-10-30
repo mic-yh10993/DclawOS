@@ -235,6 +235,20 @@ grep -q 'connector_send' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.
     echo "agent lib lacks connector_send tool" >&2
     exit 1
 }
+# Phase 3 module 4: full-access toggle. The schema must carry the key
+# (agentlib reads it via the gsettings CLI) and the settings GUI must
+# wire it; the service itself never writes its own permission.
+# (settings already extracted to $WORK/settings-extract by the
+# Phase 2 block above; reuse it, do not re-extract.)
+unsquashfs -d "$WORK/schema-extract" "$FS" usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml >/dev/null 2>&1
+grep -q 'agent-full-access' "$WORK/schema-extract/usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml" || {
+    echo "schema lacks agent-full-access key" >&2
+    exit 1
+}
+grep -q 'agent-full-access' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings does not wire agent-full-access" >&2
+    exit 1
+}
 # Phase 3 module 2: chat summon target + settings connectors/secrets
 # pages. The hook retargets menu + keybind to dclawos-chat; the gate
 # reads the packaged Openbox configs from the image.
