@@ -1,0 +1,15 @@
+#!/bin/sh
+# Enable dclawos-agent at boot (Phase 3 module 1).
+# Manual symlink (not systemctl enable): no daemon runs in the chroot,
+# and a symlink is exactly what enable would create. Hard-fails if the
+# unit file is missing so a silently unstarted agent service cannot ship.
+set -eu
+
+UNIT=/etc/systemd/system/dclawos-agent.service
+[ -f "$UNIT" ] || {
+    echo "dclawos-agent: missing unit file: $UNIT" >&2
+    exit 1
+}
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf "$UNIT" \
+  /etc/systemd/system/multi-user.target.wants/dclawos-agent.service

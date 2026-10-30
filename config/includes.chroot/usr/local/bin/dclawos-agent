@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""DclawOS agent service daemon (Phase 3 module 1).
+
+Runs as the dclaw-agent user via systemd (dclawos-agent.service).
+Polls the task queue (/var/lib/dclawos/tasks/) and executes task
+steps sequentially. No LLM runs in this image: tasks carry explicit
+tool steps (from the chat window, from assigned tasks, or from a
+parent task), and the service executes them with approval gates,
+audit events and the cooperative stop flag. A chat task with no tool
+steps is recorded honestly as "no steps to execute" instead of
+pretending an LLM answered it.
+
+Tools (see agentlib.classify for the approval tier of each):
+  shell, read_file, write_file, list_files, service_status,
+  service_restart, package_install, route_decide, mcp_call,
+  skill_run, subagent, takeover_request.
+Privileged operations go through the ticket broker (root daemon):
+the service never runs sudo itself and never holds privileges.
+
+Reuse notes (evaluation cards §5/§6/§7/§9):
+- The approve-before-execute ticket pattern follows OpenClaw's
+  gateway approval pattern; the transport is DclawOS ticket files.
+// reuse-check: openclaw agent-step loop NOT copied, reason: the
+  gateway loop assumes an LLM + gateway session; DclawOS steps are
+  explicit tool steps from a task file, so this loop is DclawOS-written.
+// reuse-check: openclaw computer-tool NOT copied here, reason: GUI
+  operation lives in dclawos-gui (Phase 2 module 6) and is reached
+  through the broker/takeover path, not re-implemented in the daemon.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+import agentlib  # noqa: E402
+import ticketlib  # noqa: E402
+
+POLL_SECONDS = 2
+SHELL_TIMEOUT_DEFAULT = 120
+SHELL_OUTPUT_CAP = 8192
+READ_SIZE_CAP = 1024 * 1024
+
+
+def log(msg):
+    print(f"dclawos-agent: {msg}", flush=True)
+
+
+def _broker_execute(ticket_id, operation, params):
+    """Execute one ticketed broker op. Returns the broker reply dict."""
+    import socket
+    request = json.dumps({"ticket_id": ticket_id, "operation": operation,
+                          "params": params}) + "\n"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(60)
+        sock.connect(ticketlib.socket_path())
+        sock.sendall(request.encode("utf-8"))
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        sock.close()
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {"ok": False, "error": "broker reply not valid JSON"}
+
+
+def _run_shell(params):
+    argv = params.get("argv")
+    if not isinstance(argv, list) or not argv or \
+            not all(isinstance(a, str) for a in argv):
+        raise ValueError("shell needs an 'argv' list of strings")
+    cwd = params.get("cwd") or agentlib.agent_workspace()
+    timeout = params.get("timeout") or SHELL_TIMEOUT_DEFAULT
+    try:
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True,
+                              text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise ValueError(f"command not found: {argv[0]!r}")
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"shell timed out after {timeout}s")
+    except OSError as exc:
+        raise ValueError(f"shell failed: {exc}")
+    out = (proc.stdout or "")[-SHELL_OUTPUT_CAP:]
+    err = (proc.stderr or "")[-SHELL_OUTPUT_CAP:]
+    return {"returncode": proc.returncode, "stdout": out, "stderr": err}
+
+
+def _read_file(params):
+    path = params.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError("read_file needs a path")
+    real = os.path.realpath(path)
+    if os.path.getsize(real) > READ_SIZE_CAP:
+        raise ValueError("read_file file too large (>1MB)")
+    with open(real, "r", encoding="utf-8", errors="replace") as handle:
+        return {"path": real, "content": handle.read()}
+
+
+def _write_file(params):
+    path = params.get("path")
+    content = params.get("content")
+    if not isinstance(path, str) or not path:
+        raise ValueError("write_file needs a path")
+    if not isinstance(content, str):
+        raise ValueError("write_file needs string content")
+    real = os.path.realpath(path)
+    parent = os.path.dirname(real)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(real, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    return {"path": real, "bytes": len(content.encode("utf-8"))}
+
+
+def _list_files(params):
+    path = params.get("path") or agentlib.agent_workspace()
+    if not isinstance(path, str) or not path:
+        raise ValueError("list_files needs a path")
+    names = sorted(os.listdir(path))
+    return {"path": path, "entries": names}
+
+
+def _broker_tool(ticket_id, operation, params):
+    reply = _broker_execute(ticket_id, operation, params)
+    if not reply.get("ok"):
+        raise ValueError(f"broker refused: {reply.get('error')}")
+    return reply.get("result")
+
+
+def _route_decide(params):
+    proc = subprocess.run(["dclawos-route"], input=None,
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise ValueError(f"dclawos-route failed: {proc.stderr.strip()}")
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        raise ValueError("dclawos-route output not valid JSON")
+
+
+def _takeover_request(params):
+    import takeoverlib
+    kind = params.get("kind", "other")
+    message = params.get("message", "")
+    request = takeoverlib.new_request(kind, message,
+                                      params.get("app_hint", ""))
+    takeoverlib.ensure_dir(takeoverlib.requests_dir())
+    takeoverlib.save_request(request)
+    timeout = params.get("timeout") or 600
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if agentlib.stop_requested():
+            return {"request_id": request["id"], "outcome": "cancelled"}
+        try:
+            current = takeoverlib.load_request(request["id"])
+        except (OSError, ValueError):
+            return {"request_id": request["id"], "outcome": "expired"}
+        if current.get("status") in ("done", "failed", "cancelled"):
+            result = current.get("result") or {}
+            return {"request_id": request["id"],
+                    "outcome": result.get("outcome", "fail"),
+                    "session_handle": result.get("session_handle", "")}
+        time.sleep(2)
+    return {"request_id": request["id"], "outcome": "timeout"}
+
+
+def _subagent(params, task):
+    goal = params.get("goal", "")
+    steps = params.get("steps") or []
+    child = agentlib.new_task(f"subagent of {task['id']}", goal, steps,
+                              parent=task["id"])
+    agentlib.save_task(child)
+    agentlib.log_event("system",
+                       f"subagent task {child['id']} started",
+                       session=task["session"])
+    timeout = params.get("timeout") or 1800
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if agentlib.stop_requested():
+            return {"child_id": child["id"], "status": "cancelled"}
+        current = agentlib.load_task(child["id"])
+        if current.get("status") in ("done", "failed", "cancelled"):
+            return {"child_id": child["id"],
+                    "status": current["status"],
+                    "result": current.get("result"),
+                    "error": current.get("error")}
+        time.sleep(2)
+    return {"child_id": child["id"], "status": "timeout"}
+
+
+def execute_step(task, step):
+    """Execute one step dict {tool, params}. Returns the step result.
+
+    Approval is enforced here, not in the tools: tier 0 runs free,
+    tiers 1-2 need an approved ticket (or full-access auto-approval).
+    Unknown tools fail closed via classify().
+    """
+    tool = step.get("tool")
+    params = step.get("params") or {}
+    tier, reason = agentlib.classify(tool, params)
+    ticket_id = None
+    if tier > 0:
+        summary = f"{tool} {json.dumps(params, ensure_ascii=False)[:200]}"
+        verdict, ticket_id = agentlib.request_approval(tool, params, summary)
+        if verdict != "approved":
+            raise ValueError(f"approval {verdict} for {tool} ({reason})")
+    if tool == "shell":
+        return _run_shell(params)
+    if tool == "read_file":
+        return _read_file(params)
+    if tool == "write_file":
+        return _write_file(params)
+    if tool == "list_files":
+        return _list_files(params)
+    if tool == "service_status":
+        return _broker_tool(ticket_id, "service-status", params)
+    if tool == "service_restart":
+        return _broker_tool(ticket_id, "restart-service", params)
+    if tool == "package_install":
+        return _broker_tool(ticket_id, "package-install", params)
+    if tool == "route_decide":
+        return _route_decide(params)
+    if tool == "mcp_call":
+        import mcpclient
+        return mcpclient.call_tool(params, ticket_id)
+    if tool == "skill_run":
+        import skills
+        return skills.run_skill(params, ticket_id)
+    if tool == "subagent":
+        return _subagent(params, task)
+    if tool == "takeover_request":
+        return _takeover_request(params)
+    raise ValueError(f"unknown tool: {tool!r}")
+
+
+def run_task(task):
+    """Run one task to completion. Returns the updated task dict."""
+    task["status"] = "running"
+    agentlib.save_task(task)
+    agentlib.log_event("system", f"task started: {task['title']}",
+                       session=task["session"])
+    results = []
+    try:
+        steps = task.get("steps") or []
+        if not steps:
+            task["status"] = "done"
+            task["result"] = {"note": "no steps to execute"}
+            agentlib.log_event(
+                "system",
+                "task has no steps; recorded honestly, no LLM answer "
+                "pretended", session=task["session"])
+            agentlib.save_task(task)
+            return task
+        for index, step in enumerate(steps):
+            if agentlib.stop_requested():
+                task["status"] = "cancelled"
+                task["error"] = "stopped by human"
+                agentlib.log_event("system", "task cancelled by stop flag",
+                                   session=task["session"])
+                agentlib.save_task(task)
+                return task
+            task["current"] = index
+            agentlib.save_task(task)
+            tool = step.get("tool", "?")
+            agentlib.log_event("command", f"step {index}: {tool}",
+                               session=task["session"])
+            try:
+                results.append(execute_step(task, step))
+            except Exception as exc:  # noqa: BLE001 - step errors are data
+                task["status"] = "failed"
+                task["error"] = str(exc)
+                agentlib.log_event("system",
+                                   f"task failed at step {index}: {exc}",
+                                   session=task["session"])
+                agentlib.save_task(task)
+                return task
+        task["status"] = "done"
+        task["result"] = {"steps": len(results), "results": results}
+        agentlib.log_event("system",
+                           f"task done: {len(results)} steps",
+                           session=task["session"])
+    finally:
+        if task["status"] == "running":
+            task["status"] = "failed"
+            task["error"] = "interrupted"
+    agentlib.save_task(task)
+    return task
+
+
+def serve_forever():
+    lock_path = "/var/lib/dclawos/agent.lock"
+    try:
+        agentlib.ensure_exchange_dir("/var/lib/dclawos")
+        lock_file = open(lock_path, "a", encoding="utf-8")
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        log("another dclawos-agent is already running; exiting")
+        return 1
+    log("dclawos-agent serving (polling task queue)")
+    while True:
+        try:
+            task = agentlib.next_queued_task()
+            if task is not None:
+                run_task(task)
+            else:
+                time.sleep(POLL_SECONDS)
+        except KeyboardInterrupt:
+            log("dclawos-agent stopping")
+            return 0
+        except Exception as exc:  # noqa: BLE001 - daemon must not die
+            log(f"loop error (continuing): {exc}")
+            time.sleep(POLL_SECONDS)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="dclawos-agent")
+    parser.add_argument("--once", action="store_true",
+                        help="run one queued task, then exit")
+    args = parser.parse_args()
+    if args.once:
+        task = agentlib.next_queued_task()
+        if task is None:
+            print(json.dumps({"ran": False}))
+            return 0
+        result = run_task(task)
+        print(json.dumps({"ran": True, "task": result["id"],
+                          "status": result["status"]}))
+        return 0
+    return serve_forever()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

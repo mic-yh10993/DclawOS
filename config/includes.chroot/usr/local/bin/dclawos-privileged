@@ -130,10 +130,90 @@ def op_restart_service(params):
     return True, {"unit": unit, "restarted": True}
 
 
+PACKAGE_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*$")
+SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+SECRETS_DIR = "/var/lib/dclawos/secrets"
+
+
+def op_package_install(params):
+    """Install one Debian package (Phase 3 module 1: agent may install).
+
+    Ticket-gated like every mutating op. The package name is strictly
+    validated (no version specs, no flags, no shell metacharacters);
+    apt runs non-interactively with --no-install-recommends so an
+    install cannot drag in a desktop's worth of recommends.
+    """
+    package = params.get("package")
+    if not isinstance(package, str) or not PACKAGE_RE.match(package):
+        return False, f"invalid package name: {package!r}"
+    env = dict(os.environ)
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    try:
+        proc = subprocess.run(
+            ["apt-get", "install", "-y", "--no-install-recommends",
+             package],
+            capture_output=True, text=True, timeout=600, env=env)
+    except FileNotFoundError:
+        return False, "apt-get not available"
+    except subprocess.TimeoutExpired:
+        return False, "apt-get install timed out"
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-500:]
+        return False, f"apt-get install failed ({proc.returncode}): {tail}"
+    return True, {"package": package, "installed": True}
+
+
+def op_write_secret(params):
+    """Store one agent secret (Phase 3 module 1).
+
+    The value travels inside the broker request (local Unix socket,
+    group-gated) and is written to a file owned by dclaw-agent 0600;
+    it is NEVER stored in a ticket file (tickets hold only the params
+    hash + summary), NEVER logged, and NEVER returned. The agent
+    service reads its own secret files directly; there is no CLI get
+    path by design. Directory is 0711 root-owned: the agent can open
+    files it owns by name but cannot list the directory.
+    """
+    name = params.get("name")
+    value = params.get("value")
+    if not isinstance(name, str) or not SECRET_NAME_RE.match(name):
+        return False, f"invalid secret name: {name!r}"
+    if not isinstance(value, str) or not value:
+        return False, "write-secret needs a non-empty string value"
+    try:
+        os.makedirs(SECRETS_DIR, exist_ok=True)
+        os.chmod(SECRETS_DIR, 0o711)
+    except OSError as exc:
+        return False, f"cannot prepare secrets dir: {exc}"
+    path = os.path.join(SECRETS_DIR, name)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(value)
+        try:
+            import pwd
+            uid = pwd.getpwnam("dclaw-agent").pw_uid
+            os.chown(tmp, uid, -1)
+        except (KeyError, OSError):
+            log("write-secret: dclaw-agent user missing; "
+                "leaving file root-owned")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False, f"write-secret failed: {exc}"
+    return True, {"name": name, "stored": True}
+
+
 OPERATIONS = {
     "read-file": op_read_file,
     "service-status": op_service_status,
     "restart-service": op_restart_service,
+    "package-install": op_package_install,
+    "write-secret": op_write_secret,
 }
 
 

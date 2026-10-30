@@ -1,0 +1,16 @@
+[Unit]
+Description=DclawOS agent service (task execution, approval-gated tools)
+After=dclawos-privileged.service
+Requires=dclawos-privileged.service
+
+[Service]
+Type=simple
+User=dclaw-agent
+ExecStart=/usr/local/bin/dclawos-agent
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

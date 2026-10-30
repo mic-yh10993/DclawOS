@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""DclawOS approval popup (Phase 3 module 1).
+
+Lists PENDING tickets (see ticketlib.py) and lets the human approve or
+deny them. This is the production approval path for the agent service:
+the CLI approve command stays test-only. The popup shows the operation
+and the params SUMMARY only — never secret values (ticket files hold
+no secrets by construction) — and logs ticket id + verdict only.
+
+A ticket approved here is still bound to its exact operation + params
+hash by the broker (ticketlib.validate_for_execution); approving a
+ticket does not grant anything beyond that one operation.
+"""
+
+import os
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+try:
+    import ticketlib
+except ImportError as exc:
+    print(f"dclawos-approve: ticket store unavailable: {exc}",
+          file=sys.stderr)
+    sys.exit(1)
+
+POLL_MS = 2000
+
+
+def log(msg):
+    print(f"dclawos-approve: {msg}", flush=True)
+
+
+def list_pending():
+    out = []
+    try:
+        names = os.listdir(ticketlib.tickets_dir())
+    except OSError:
+        return out
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
+        try:
+            ticket = ticketlib.load_ticket(name[:-5])
+        except (OSError, ValueError):
+            continue
+        if ticket.get("status") == "pending" and \
+                not ticketlib.is_expired(ticket):
+            out.append(ticket)
+    return out
+
+
+class ApproveApp(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="dclawos-approve")
+        self.set_default_size(700, 420)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.add(box)
+
+        header = Gtk.Label(
+            label="AI 操作审批 — 批准后 broker 只执行票据上那一个操作")
+        header.set_halign(Gtk.Align.START)
+        box.pack_start(header, False, False, 0)
+
+        self.store = Gtk.ListStore(str, str, str, str)
+        tree = Gtk.TreeView(model=self.store)
+        for index, title in enumerate(
+                ("票据", "操作", "摘要", "创建时间")):
+            column = Gtk.TreeViewColumn(
+                title, Gtk.CellRendererText(), text=index)
+            tree.append_column(column)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.add(tree)
+        box.pack_start(scrolled, True, True, 0)
+        self.tree = tree
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        approve = Gtk.Button(label="批准")
+        approve.connect("clicked", self.on_verdict, "approved")
+        deny = Gtk.Button(label="拒绝")
+        deny.connect("clicked", self.on_verdict, "denied")
+        row.pack_start(approve, False, False, 0)
+        row.pack_start(deny, False, False, 0)
+        self.status = Gtk.Label(label="")
+        self.status.set_halign(Gtk.Align.START)
+        row.pack_start(self.status, True, True, 0)
+        box.pack_start(row, False, False, 0)
+
+        self.refresh()
+        GLib.timeout_add(POLL_MS, self.refresh)
+
+    def _selected_id(self):
+        selection = self.tree.get_selection()
+        model, paths = selection.get_selected_rows()
+        if not paths:
+            return None
+        return model[paths[0]][0]
+
+    def on_verdict(self, _button, verdict):
+        ticket_id = self._selected_id()
+        if ticket_id is None:
+            self.status.set_text("请先选择一条待审批")
+            return
+        try:
+            ticket = ticketlib.load_ticket(ticket_id)
+        except (OSError, ValueError) as exc:
+            self.status.set_text(f"读取票据失败：{exc}")
+            return
+        if ticket.get("status") != "pending":
+            self.status.set_text("该票据已不在待审批状态")
+            self.refresh()
+            return
+        ticket["status"] = verdict
+        ticket["approved_by"] = "human-gui"
+        ticket["approved_at"] = int(time.time())
+        try:
+            ticketlib.save_ticket(ticket)
+        except OSError as exc:
+            self.status.set_text(f"保存失败：{exc}")
+            return
+        log(f"ticket={ticket_id} verdict={verdict}")
+        self.status.set_text(f"已{verdict}票据 {ticket_id}")
+        self.refresh()
+
+    def refresh(self):
+        self.store.clear()
+        for ticket in list_pending():
+            created = time.strftime(
+                "%H:%M:%S", time.localtime(ticket.get("created_at", 0)))
+            self.store.append([
+                ticket.get("id", ""),
+                ticket.get("operation", ""),
+                (ticket.get("params_summary") or "")[:200],
+                created,
+            ])
+        return True
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("usage: dclawos-approve (lists pending tickets)")
+        return 0
+    log("dclawos-approve started")
+    win = ApproveApp()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

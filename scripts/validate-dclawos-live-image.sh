@@ -64,6 +64,14 @@ for path in \
     usr/local/bin/dclawos-takeover-request \
     usr/local/bin/dclawos-gui \
     usr/local/bin/dclawos-agent-ctl \
+    usr/local/bin/dclawos-agent \
+    usr/local/bin/dclawos-approve \
+    usr/local/bin/dclawos-secret \
+    usr/local/lib/dclawos/agentlib.py \
+    usr/local/lib/dclawos/mcpclient.py \
+    usr/local/lib/dclawos/skills.py \
+    etc/systemd/system/dclawos-agent.service \
+    etc/systemd/system/multi-user.target.wants/dclawos-agent.service \
     usr/local/bin/dclawos-monitor \
     usr/local/bin/dclawos-agent-run \
     usr/local/bin/dclawos-editor \
@@ -198,6 +206,34 @@ grep -q 'ExecStart=/usr/local/bin/dclawos-privileged' "$WORK/privunit-extract/et
 }
 grep -q 'WantedBy=multi-user.target' "$WORK/privunit-extract/etc/systemd/system/dclawos-privileged.service" || {
     echo "privilege broker unit missing WantedBy=multi-user.target" >&2
+    exit 1
+}
+# Phase 3 module 1: agent service daemon + approval popup + secret CLI
+# + shared agent lib + agent unit (enabled by hook 1006). The daemon
+# itself needs a live session to run tasks, so the gate checks
+# presence + syntax + unit wiring, not behavior.
+for tool in dclawos-agent dclawos-approve dclawos-secret; do
+    unsquashfs -d "$WORK/${tool}-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
+    test -x "$WORK/${tool}-extract/usr/local/bin/${tool}"
+    python3 -m py_compile "$WORK/${tool}-extract/usr/local/bin/${tool}"
+done
+unsquashfs -d "$WORK/agentlib-extract" "$FS" usr/local/lib/dclawos/agentlib.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py"
+for lib in mcpclient skills; do
+    unsquashfs -d "$WORK/${lib}-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    python3 -m py_compile "$WORK/${lib}-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'classify' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
+    echo "agent lib lacks approval classification" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/agentunit-extract" "$FS" etc/systemd/system/dclawos-agent.service >/dev/null 2>&1
+grep -q 'ExecStart=/usr/local/bin/dclawos-agent' "$WORK/agentunit-extract/etc/systemd/system/dclawos-agent.service" || {
+    echo "agent service unit has wrong ExecStart" >&2
+    exit 1
+}
+grep -q 'User=dclaw-agent' "$WORK/agentunit-extract/etc/systemd/system/dclawos-agent.service" || {
+    echo "agent service unit must run as dclaw-agent" >&2
     exit 1
 }
 # Phase 2 module 6: takeover popup + request CLI + GUI op CLI + shared
