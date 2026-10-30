@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Model-facing tool schemas (Phase 4 module 2, gap row A5).
+
+OpenClaw constructs the model's tool list at runtime
+(src/agents/agent-tools.ts:184,254,677; core-coding-tools.ts:204).
+DclawOS's dispatch set already exists (agentlib.TOOLS +
+dclawos-agent.execute_step); what was missing is the schema layer
+that serialises those tools into an LLM `tools[]` parameter. This
+module is that layer: one schema per dispatch tool, kept beside the
+classify() tiers so a new tool must appear in both places.
+
+// reuse-check: OpenClaw tool definitions NOT copied, reason: their
+  schemas are written against OpenClaw's gateway tool objects
+  (TypeBox, host/node routing); the portable contract is the
+  OpenAI tools[] shape (name + description + JSON-Schema
+  parameters), which these schemas implement for the DclawOS tool
+  set with upstream's descriptions as the behavioural reference.
+
+Schema parameter names are exactly the step params execute_step
+consumes, so a model tool_call maps 1:1 onto a task step:
+{name, arguments(JSON string)} -> {tool: name, params: arguments}.
+"""
+
+import json
+
+_STR = {"type": "string"}
+_OBJ = {"type": "object"}
+
+
+def _schema(name, description, properties, required=()):
+    params = {"type": "object", "properties": properties}
+    if required:
+        params["required"] = list(required)
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": params,
+        },
+    }
+
+
+TOOL_SCHEMAS = [
+    _schema("shell",
+            "Run a shell command (argv array, no shell interpolation) "
+            "in the agent workspace. Mutating: needs approval.",
+            {"argv": {"type": "array", "items": _STR},
+             "cwd": _STR, "timeout": {"type": "number"}},
+            ("argv",)),
+    _schema("read_file", "Read a text file (max 1MB).",
+            {"path": _STR}, ("path",)),
+    _schema("write_file", "Write a text file, creating parent dirs.",
+            {"path": _STR, "content": _STR}, ("path", "content")),
+    _schema("list_files", "List the entries of a directory.",
+            {"path": _STR}),
+    _schema("service_status", "Report the status of a systemd service.",
+            {"name": _STR}, ("name",)),
+    _schema("service_restart",
+            "Restart a systemd service via the privileged broker. "
+            "Needs approval.",
+            {"name": _STR}, ("name",)),
+    _schema("package_install",
+            "Install a Debian package via the privileged broker. "
+            "Needs approval.",
+            {"name": _STR}, ("name",)),
+    _schema("route_decide",
+            "Ask the routing engine which provider/model should "
+            "serve a task. Read-only.",
+            {}),
+    _schema("mcp_call",
+            "Call a tool on a configured MCP server.",
+            {"server": _STR, "tool": _STR, "arguments": _OBJ},
+            ("server", "tool")),
+    _schema("skill_run", "Run an installed skill by id.",
+            {"skill": _STR, "input": _STR}, ("skill",)),
+    _schema("subagent",
+            "Delegate a goal to a child agent session with its own "
+            "conversation; returns the child's final reply.",
+            {"goal": _STR}, ("goal",)),
+    _schema("takeover_request",
+            "Ask the human to take over a GUI step (captcha, login). "
+            "Returns only an outcome and a session handle, never "
+            "credentials.",
+            {"kind": _STR, "message": _STR, "app_hint": _STR},
+            ("message",)),
+    _schema("connector_send",
+            "Send a message through a configured connector.",
+            {"connector": _STR, "message": _STR},
+            ("connector", "message")),
+]
+
+SCHEMA_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
+
+
+def tools_for_model():
+    """The tools[] payload for an LLM request (deep copy)."""
+    return json.loads(json.dumps(TOOL_SCHEMAS))
+
+
+def parse_tool_call(call):
+    """Map one model tool_call onto a task step dict.
+
+    Returns {tool, params} or raises ValueError on bad input: the
+    loop treats a malformed tool call as data for the model, never
+    as an instruction to execute something unvalidated.
+    """
+    if not isinstance(call, dict):
+        raise ValueError("tool call is not an object")
+    fn = call.get("function") or {}
+    name = fn.get("name")
+    if name not in SCHEMA_NAMES:
+        raise ValueError(f"unknown tool requested by model: {name!r}")
+    raw = fn.get("arguments") or "{}"
+    if isinstance(raw, str):
+        try:
+            params = json.loads(raw)
+        except ValueError:
+            raise ValueError(f"tool {name}: arguments not valid JSON")
+    elif isinstance(raw, dict):
+        params = raw
+    else:
+        raise ValueError(f"tool {name}: arguments must be an object")
+    if not isinstance(params, dict):
+        raise ValueError(f"tool {name}: arguments must be an object")
+    return {"tool": name, "params": params}

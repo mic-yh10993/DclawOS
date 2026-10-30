@@ -1,0 +1,18 @@
+#!/bin/sh
+# DclawOS agent-loop behavior gate (Phase 4 module 2). Hard-fails:
+# the LLM loop must prove itself inside the image before the ISO
+# can go green. Runs the real agent daemon against a local mock
+# OpenAI-compatible endpoint (dummy key, no external network):
+# tool-call round trip, transcript persistence, cost accounting
+# from mock usage, and the honest model-less path.
+set -eu
+
+[ -f /usr/local/lib/dclawos/agentlooptest.py ] || {
+    echo "dclawos-looptest: test script missing" >&2
+    exit 1
+}
+[ -s /usr/share/dclawos/engine/llm.js ] || {
+    echo "dclawos-looptest: llm engine bundle missing (hook 1003)" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/agentlooptest.py

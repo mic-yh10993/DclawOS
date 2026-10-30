@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""DclawOS chat window (Phase 3 module 2): task assignment + console.
+"""DclawOS chat window (Phase 3 module 2; Phase 4 module 2).
 
 This is the AI chat page the user can summon at any time (right-click
-"向 AI 提问", Super+Space). It is NOT a fake LLM chat: DclawOS has no
-model call path yet, so the window never invents model replies. What
-it does, honestly:
+"向 AI 提问", Super+Space). Phase 4 connects it to the real model
+call path (dclawos-llm via the agent loop):
 
-- Plain text: creates a task (title + goal) in the agent queue. The
-  service runs it when it has steps; a message with no steps is
-  recorded honestly as "no steps to execute" and shown as such.
+- Plain text: creates an "llm" task bound to this window's
+  persistent conversation (convlib transcript). When a provider is
+  configured (Settings AI panel + an llm-<provider> secret), the
+  agent loop answers with real model output and can call tools
+  through the approval gates. When NO provider is configured, the
+  task is recorded honestly as model-less — the window never
+  invents model replies.
 - Slash commands create real one-step tasks that the agent service
   executes through the tiered approval system:
     /run <argv...>        shell step (argv split, no shell=True)
@@ -51,8 +54,10 @@ sys.path.insert(0, os.path.join(
 
 try:
     import agentlib
+    import convlib
 except ImportError:
     agentlib = None
+    convlib = None
 
 import gi
 
@@ -83,15 +88,16 @@ class ChatWindow(Gtk.Window):
         self.set_titlebar(header)
         self.known_tasks = {}  # task id -> last known status
         self.shown_events = 0
+        self.conv_session = self._load_conv_session()
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)
         self.add(box)
 
         note = Gtk.Label(
-            label="AI 聊天：指派任务与工具控制台。大模型对话尚未接入——"
-                  "普通消息会创建任务并如实记录（无步骤时不伪造回答）。"
-                  "供应商配置好后，消息可转为模型步骤。")
+            label="AI 聊天：普通消息走大模型对话（需在「设置 → AI」选好"
+                  "供应商并在「密钥」页保存 llm-<供应商> 密钥；未配置时"
+                  "如实记录、不伪造回答）。/命令 直接指派工具步骤。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         box.pack_start(note, False, False, 0)
@@ -138,7 +144,57 @@ class ChatWindow(Gtk.Window):
         box.pack_start(btn_row, False, False, 0)
 
         self.append_line("系统：聊天窗口已就绪。" + HELP_TEXT)
+        self._restore_history()
         GLib.timeout_add(POLL_MS, self.poll)
+
+    def _session_file(self):
+        base = os.environ.get("XDG_CONFIG_HOME") or \
+            os.path.expanduser("~/.config")
+        return os.path.join(base, "dclawos", "chat-session")
+
+    def _load_conv_session(self):
+        """The window's persistent conversation id (survives restarts
+        so the transcript continues; the transcript itself lives in
+        the shared conversation store)."""
+        try:
+            with open(self._session_file(), "r",
+                      encoding="utf-8") as handle:
+                value = handle.read().strip()
+            if convlib is not None and \
+                    convlib.SESSION_ID_RE.match(value):
+                return value
+        except OSError:
+            pass
+        import secrets as _secrets
+        value = _secrets.token_hex(8)
+        try:
+            os.makedirs(os.path.dirname(self._session_file()),
+                        exist_ok=True)
+            with open(self._session_file(), "w",
+                      encoding="utf-8") as handle:
+                handle.write(value)
+        except OSError:
+            pass
+        return value
+
+    def _restore_history(self):
+        if convlib is None:
+            return
+        try:
+            entries = convlib.load_entries(self.conv_session)
+        except (OSError, ValueError):
+            return
+        for entry in entries[-20:]:
+            if entry.get("kind") != "message":
+                continue
+            message = entry.get("message") or {}
+            content = message.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if message.get("role") == "user":
+                self.append_line(f"你：{content}")
+            elif message.get("role") == "assistant":
+                self.append_line(f"AI：{content}")
 
     def _launch(self, _button, command):
         try:
@@ -155,12 +211,15 @@ class ChatWindow(Gtk.Window):
 
     # ------------------------------------------------------------ tasks
 
-    def create_task(self, title, goal, steps):
+    def create_task(self, title, goal, steps, kind="steps"):
         if agentlib is None:
             self.append_line("系统：agentlib 不可用，无法创建任务。")
             return None
         try:
             task = agentlib.new_task(title, goal, steps)
+            if kind == "llm":
+                task["kind"] = "llm"
+                task["conv_session"] = self.conv_session
             agentlib.save_task(task)
         except (OSError, ValueError) as exc:
             self.append_line(f"系统：创建任务失败：{exc}")
@@ -252,7 +311,7 @@ class ChatWindow(Gtk.Window):
             if parsed is not None:
                 self.create_task(*parsed)
         else:
-            self.create_task(text[:80], text, [])
+            self.create_task(text[:80], text, [], kind="llm")
 
     def on_assign(self, _button):
         dialog = Gtk.Dialog(title="指派任务", transient_for=self,
@@ -314,10 +373,23 @@ class ChatWindow(Gtk.Window):
             if tid in self.known_tasks and \
                     self.known_tasks[tid] != status and \
                     status in ("done", "failed", "cancelled"):
-                result = task.get("result") or task.get("error") or ""
-                shown = json.dumps(result, ensure_ascii=False)[:400]
-                self.append_line(
-                    f"任务完成 [{task.get('title', tid)}] {status}：{shown}")
+                result = task.get("result") or {}
+                if task.get("kind") == "llm" and \
+                        isinstance(result, dict) and result.get("reply"):
+                    self.append_line(f"AI：{result['reply']}")
+                elif task.get("kind") == "llm" and \
+                        isinstance(result, dict) and \
+                        result.get("model_configured") is False:
+                    self.append_line(
+                        "系统：未配置供应商密钥，本条消息已如实记录，"
+                        "没有生成模型回答。")
+                else:
+                    shown = json.dumps(
+                        result or task.get("error") or "",
+                        ensure_ascii=False)[:400]
+                    self.append_line(
+                        f"任务完成 [{task.get('title', tid)}] "
+                        f"{status}：{shown}")
             self.known_tasks[tid] = status
         self.status.set_text(
             f"队列：{counts.get('queued', 0)} 等待，"

@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""DclawOS agent service daemon (Phase 3 module 1).
+"""DclawOS agent service daemon (Phase 3 module 1; Phase 4 module 2).
 
 Runs as the dclaw-agent user via systemd (dclawos-agent.service).
-Polls the task queue (/var/lib/dclawos/tasks/) and executes task
-steps sequentially. No LLM runs in this image: tasks carry explicit
-tool steps (from the chat window, from assigned tasks, or from a
-parent task), and the service executes them with approval gates,
-audit events and the cooperative stop flag. A chat task with no tool
-steps is recorded honestly as "no steps to execute" instead of
-pretending an LLM answered it.
+Polls the task queue (/var/lib/dclawos/tasks/) and executes tasks:
+
+- kind "steps" (default): explicit tool steps (chat slash commands,
+  assigned tasks, parent tasks), executed sequentially with approval
+  gates, audit events and the cooperative stop flag. A steps task
+  with no steps is recorded honestly as "no steps to execute".
+- kind "llm" (Phase 4): the agent loop. The task goal is a user
+  message in a persistent conversation (convlib transcripts); the
+  loop calls the model through llmlib -> dclawos-llm (routing
+  decision + dispatch + executor in the engine), turns model
+  tool_calls into steps executed by the SAME execute_step approval
+  path, feeds tool results back, and repeats until the model answers
+  without tool calls (or the turn cap / stop flag hits). When no
+  provider key is configured the task is recorded honestly as
+  model-less; no reply is ever fabricated.
 
 Tools (see agentlib.classify for the approval tier of each):
   shell, read_file, write_file, list_files, service_status,
@@ -157,23 +165,32 @@ def _subagent(params, task):
     steps = params.get("steps") or []
     child = agentlib.new_task(f"subagent of {task['id']}", goal, steps,
                               parent=task["id"])
+    if not steps and goal:
+        # Goal-only delegation runs the child as an LLM task with its
+        # own conversation (Phase 4 module 2/5).
+        child["kind"] = "llm"
+        child["conv_session"] = child["session"]
+    if params.get("model"):
+        child["model"] = params["model"]
+    if params.get("provider"):
+        child["provider"] = params["provider"]
     agentlib.save_task(child)
     agentlib.log_event("system",
                        f"subagent task {child['id']} started",
                        session=task["session"])
-    timeout = params.get("timeout") or 1800
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if agentlib.stop_requested():
-            return {"child_id": child["id"], "status": "cancelled"}
-        current = agentlib.load_task(child["id"])
-        if current.get("status") in ("done", "failed", "cancelled"):
-            return {"child_id": child["id"],
-                    "status": current["status"],
-                    "result": current.get("result"),
-                    "error": current.get("error")}
-        time.sleep(2)
-    return {"child_id": child["id"], "status": "timeout"}
+    # The daemon is single-threaded: the child is executed INLINE by
+    # this same run (recursion), never left for the queue — a queued
+    # child could never start while the parent occupies the runner
+    # (the Phase 3 poll-for-completion shape deadlocked by design;
+    # fixed here and recorded in docs/PHASE4-GAP.md row C1).
+    run_task(child)
+    current = agentlib.load_task(child["id"])
+    result = current.get("result") or {}
+    return {"child_id": child["id"],
+            "status": current.get("status"),
+            "reply": result.get("reply"),
+            "result": result,
+            "error": current.get("error")}
 
 
 def execute_step(task, step):
@@ -225,10 +242,153 @@ def execute_step(task, step):
     raise ValueError(f"unknown tool: {tool!r}")
 
 
+LLM_MAX_TURNS = 12
+LLM_TOOL_RESULT_CAP = 8000
+
+SYSTEM_PROMPT = (
+    "You are the DclawOS system agent. You operate this machine for "
+    "the user through tools; every mutating tool call passes a "
+    "human approval gate, so propose actions plainly and never "
+    "claim an action succeeded unless its tool result says so. "
+    "Agent workspace: /home/dclaw-agent/workspace. Deleting files "
+    "and anything outside the workspace needs explicit approval. "
+    "Answer in the user's language."
+)
+
+
+def _message_text(message):
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def run_llm_task(task):
+    """The agent loop (gap rows A4/A6/A7). Returns the task dict."""
+    import convlib
+    import llmlib
+    import toolslib
+
+    conv_session = task.get("conv_session") or task["session"]
+    goal = task.get("goal") or ""
+    convlib.ensure_session(conv_session, title=goal[:60])
+    if not llmlib.provider_configured():
+        task["status"] = "done"
+        task["result"] = {
+            "note": "no provider configured: no model reply produced",
+            "model_configured": False,
+        }
+        agentlib.log_event(
+            "system",
+            "llm task recorded honestly: no provider key configured",
+            session=task["session"])
+        agentlib.save_task(task)
+        return task
+    if goal:
+        convlib.append_message(conv_session,
+                               {"role": "user", "content": goal})
+    total_cost = 0.0
+    cost_known = False
+    try:
+        for turn in range(LLM_MAX_TURNS):
+            if agentlib.stop_requested():
+                task["status"] = "cancelled"
+                task["error"] = "stopped by human"
+                agentlib.save_task(task)
+                return task
+            messages = convlib.project_messages(conv_session,
+                                                SYSTEM_PROMPT)
+            result = llmlib.call(
+                messages, tools=toolslib.tools_for_model(),
+                provider=task.get("provider"),
+                model=task.get("model"))
+            response = result.get("response")
+            if not response:
+                task["status"] = "failed"
+                task["error"] = (
+                    "all provider attempts failed: " +
+                    json.dumps(result.get("attempts", []),
+                               ensure_ascii=False)[:400])
+                agentlib.log_event(
+                    "system", "llm call failed on every target",
+                    session=task["session"])
+                agentlib.save_task(task)
+                return task
+            if result.get("costUsd") is not None:
+                total_cost += float(result["costUsd"])
+                cost_known = True
+            agentlib.log_event(
+                "llm",
+                f"turn {turn}: {result.get('provider')}/"
+                f"{result.get('model')} cost_usd="
+                f"{result.get('costUsd')}",
+                session=task["session"])
+            choices = response.get("choices") or []
+            message = (choices[0].get("message") if choices else None) \
+                or {"role": "assistant", "content": ""}
+            assistant = {"role": "assistant",
+                         "content": _message_text(message)}
+            if message.get("tool_calls"):
+                assistant["tool_calls"] = message["tool_calls"]
+            convlib.append_message(conv_session, assistant)
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                task["status"] = "done"
+                task["result"] = {
+                    "reply": assistant["content"],
+                    "provider": result.get("provider"),
+                    "model": result.get("model"),
+                    "cost_usd": total_cost if cost_known else None,
+                    "turns": turn + 1,
+                }
+                agentlib.log_event(
+                    "system", f"llm task done in {turn + 1} turns",
+                    session=task["session"])
+                agentlib.save_task(task)
+                return task
+            for call in tool_calls:
+                if agentlib.stop_requested():
+                    task["status"] = "cancelled"
+                    task["error"] = "stopped by human"
+                    agentlib.save_task(task)
+                    return task
+                try:
+                    step = toolslib.parse_tool_call(call)
+                except ValueError as exc:
+                    tool_result = {"error": str(exc)}
+                else:
+                    agentlib.log_event(
+                        "command",
+                        f"llm tool call: {step['tool']}",
+                        session=task["session"])
+                    try:
+                        tool_result = execute_step(task, step)
+                    except Exception as exc:  # noqa: BLE001 - data
+                        tool_result = {"error": str(exc)}
+                convlib.append_message(conv_session, {
+                    "role": "tool",
+                    "tool_call_id": call.get("id", ""),
+                    "content": json.dumps(
+                        tool_result, ensure_ascii=False,
+                        default=str)[:LLM_TOOL_RESULT_CAP],
+                })
+        task["status"] = "failed"
+        task["error"] = f"turn cap reached ({LLM_MAX_TURNS})"
+        agentlib.save_task(task)
+        return task
+    except ValueError as exc:
+        task["status"] = "failed"
+        task["error"] = str(exc)
+        agentlib.log_event("system", f"llm task failed: {exc}",
+                           session=task["session"])
+        agentlib.save_task(task)
+        return task
+
+
 def run_task(task):
     """Run one task to completion. Returns the updated task dict."""
     task["status"] = "running"
     agentlib.save_task(task)
+    if task.get("kind") == "llm":
+        return run_llm_task(task)
     agentlib.log_event("system", f"task started: {task['title']}",
                        session=task["session"])
     results = []

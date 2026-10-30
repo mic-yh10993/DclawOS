@@ -255,7 +255,9 @@ class SettingsApp(Gtk.Window):
         note = Gtk.Label(
             label="说明：供应商与模型下拉来自路由引擎目录 "
                   "(/usr/share/dclawos/engine/catalog.json，模块 4 编译生成)；"
-                  "目录缺失时回退自由文本输入。")
+                  "目录缺失时回退自由文本输入。API 密钥在「密钥」页保存，"
+                  "名称须为 llm-<供应商 id>（如 llm-openai）；agent 服务"
+                  "只读该命名的密钥调用模型，密钥永不回显。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         box.pack_start(note, False, False, 0)

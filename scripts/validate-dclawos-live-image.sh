@@ -58,6 +58,7 @@ for path in \
     usr/local/bin/dclawos-log-event \
     usr/local/bin/dclawos-settings \
     usr/local/bin/dclawos-route \
+    usr/local/bin/dclawos-llm \
     usr/local/bin/dclawos-privileged \
     usr/local/bin/dclawos-ticket \
     usr/local/bin/dclawos-takeover \
@@ -101,6 +102,7 @@ for path in \
     usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml \
     usr/share/glib-2.0/schemas/gschemas.compiled \
     usr/share/dclawos/engine/decision.js \
+    usr/share/dclawos/engine/llm.js \
     usr/share/dclawos/engine/catalog.json \
     usr/share/dclawos/engine-src/README.md \
     opt/dclawos-node/bin/node \
@@ -202,6 +204,25 @@ grep -q 'decision.js' "$WORK/route-extract/usr/local/bin/dclawos-route" || {
     echo "dclawos-route does not reference the engine bundle" >&2
     exit 1
 }
+# Phase 4 module 1: LLM execution bundle + CLI must exist; the llm
+# bundle carries the executor marker, and decision.js must still be
+# free of the dispatch marker (decision stays a pure offline bundle;
+# the build hook already ran the mock-endpoint behavior selftest).
+test -s "$WORK/engine-extract/usr/share/dclawos/engine/llm.js"
+grep -q 'dclawos-llm-executor-v1' "$WORK/engine-extract/usr/share/dclawos/engine/llm.js" || {
+    echo "llm bundle lacks executor marker" >&2
+    exit 1
+}
+grep -q 'dclawos-dispatch' "$WORK/engine-extract/usr/share/dclawos/engine/decision.js" && {
+    echo "decision bundle contaminated with dispatch code" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/llm-extract" "$FS" usr/local/bin/dclawos-llm >/dev/null 2>&1
+test -x "$WORK/llm-extract/usr/local/bin/dclawos-llm"
+grep -q 'llm.js' "$WORK/llm-extract/usr/local/bin/dclawos-llm" || {
+    echo "dclawos-llm does not reference the llm bundle" >&2
+    exit 1
+}
 # Phase 2 module 5: privilege broker + ticket CLI + shared ticket lib
 # must be executable and valid Python; the unit must start the broker
 # and be wanted by multi-user.target (hook 1004 enables it).
@@ -233,10 +254,21 @@ for tool in dclawos-agent dclawos-approve dclawos-secret dclawos-chat \
 done
 unsquashfs -d "$WORK/agentlib-extract" "$FS" usr/local/lib/dclawos/agentlib.py >/dev/null 2>&1
 python3 -m py_compile "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py"
-for lib in mcpclient skills connectorlib; do
+for lib in mcpclient skills connectorlib convlib toolslib llmlib; do
     unsquashfs -d "$WORK/${lib}-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
     python3 -m py_compile "$WORK/${lib}-extract/usr/local/lib/dclawos/${lib}.py"
 done
+# Phase 4 module 2: the agent daemon must carry the LLM loop and the
+# chat window must create llm tasks (behavior itself is gated at
+# build time by hook 1008 against a mock endpoint).
+grep -q 'run_llm_task' "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" || {
+    echo "agent daemon lacks the LLM loop" >&2
+    exit 1
+}
+grep -q 'kind="llm"' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat window does not create llm tasks" >&2
+    exit 1
+}
 grep -q 'classify' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
     echo "agent lib lacks approval classification" >&2
     exit 1
