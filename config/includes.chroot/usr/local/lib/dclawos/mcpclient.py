@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """MCP protocol client (Phase 3 module 1). Standard library only.
 
-Speaks MCP JSON-RPC 2.0 over stdio (newline-delimited JSON) to a
-server process launched from a registry entry (see registrylib.py:
-mcp_servers entries carry id/command/args/env/enabled). Streamable
-HTTP is deliberately NOT implemented here: the OS agent service runs
-local servers, and stdio keeps the client dependency-free; a server
-that only speaks HTTP cannot be added until a transport is written
-for it, and the registry GUI says so by only accepting commands.
+Speaks MCP JSON-RPC 2.0 to a server from a registry entry (see
+registrylib.py: mcp_servers entries carry id/command/args/env/
+enabled). Two transports: stdio (newline-delimited JSON to a
+launched server process) and — Phase 5, for agent-registered
+remote servers — Streamable HTTP (POST JSON-RPC, Mcp-Session-Id
+header, JSON or SSE-framed responses).
 
 Security rules (read before extending):
 - Server commands come ONLY from enabled registry entries. An entry
@@ -80,9 +79,9 @@ def load_server_entry(server_id):
         if entry.get("id") == server_id:
             if not entry.get("enabled", True):
                 raise MCPError(f"MCP server disabled: {server_id!r}")
-            if not entry.get("command"):
+            if not entry.get("command") and not entry.get("url"):
                 raise MCPError(
-                    f"MCP server {server_id!r} has no command")
+                    f"MCP server {server_id!r} has no command or url")
             return entry
     raise MCPError(f"unknown MCP server: {server_id!r}")
 
@@ -196,12 +195,152 @@ class MCPClient:
         return False
 
 
+class MCPHttpClient:
+    """Streamable-HTTP transport with the MCPClient interface.
+
+    One session per client lifetime: initialize captures the
+    Mcp-Session-Id response header; every later POST carries it.
+    Responses may be plain JSON or SSE-framed (data: lines); the
+    last JSON-RPC object in the body wins.
+    """
+
+    def __init__(self, entry, timeout=REQUEST_TIMEOUT_DEFAULT):
+        self.entry = entry
+        self.timeout = timeout
+        self.next_id = 1
+        self.session_id = None
+
+    def _post(self, payload, expect_reply=True):
+        import urllib.request
+        url = self.entry.get("url")
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream",
+                   "User-Agent": "DclawOS-agent/2.0"}
+        headers.update(_resolve_env(self.entry.get("env")))
+        # NOTE: env for HTTP servers carries HEADERS (e.g. an
+        # Authorization bearer via secret:<name>), unlike stdio
+        # where env is the process environment.
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        request = urllib.request.Request(url, data=data,
+                                         headers=headers,
+                                         method="POST")
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+                session = response.headers.get("Mcp-Session-Id")
+        except Exception as exc:  # noqa: BLE001 - faults are data
+            raise MCPError(f"MCP HTTP request failed: {exc}")
+        if session:
+            self.session_id = session
+        if not expect_reply or not raw.strip():
+            return {}
+        return _parse_rpc_body(raw)
+
+    def start(self):
+        reply = self.request("initialize", {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "dclawos-agent", "version": "3.0"},
+        })
+        if "error" in reply:
+            raise MCPError(f"initialize failed: {reply['error']}")
+        self.notify("notifications/initialized", {})
+        return reply.get("result", {})
+
+    def request(self, method, params):
+        request_id = self.next_id
+        self.next_id += 1
+        return self._post({"jsonrpc": "2.0", "id": request_id,
+                           "method": method, "params": params})
+
+    def notify(self, method, params):
+        self._post({"jsonrpc": "2.0", "method": method,
+                    "params": params}, expect_reply=False)
+
+    def list_tools(self):
+        reply = self.request("tools/list", {})
+        if "error" in reply:
+            raise MCPError(f"tools/list failed: {reply['error']}")
+        return (reply.get("result") or {}).get("tools", [])
+
+    def call(self, name, arguments):
+        reply = self.request("tools/call",
+                             {"name": name,
+                              "arguments": arguments or {}})
+        if "error" in reply:
+            raise MCPError(f"tools/call failed: {reply['error']}")
+        result = reply.get("result") or {}
+        if result.get("isError"):
+            content = result.get("content") or []
+            text = " ".join(str(c.get("text", "")) for c in content)
+            raise MCPError(f"tool reported error: {text[:500]}")
+        return result
+
+    def stop(self):
+        self.session_id = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def _parse_rpc_body(raw):
+    """Parse a JSON or SSE-framed JSON-RPC response body."""
+    text = raw.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except ValueError:
+        pass
+    found = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            parsed = json.loads(line[len("data:"):].strip())
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            found = parsed
+    if found:
+        return found
+    raise MCPError("MCP HTTP response is not valid JSON-RPC")
+
+
+def _client_for(entry, timeout):
+    if entry.get("transport") == "http" or entry.get("url"):
+        return MCPHttpClient(entry, timeout=timeout)
+    return MCPClient(entry, timeout=timeout)
+
+
+def validate_server(entry, timeout=REQUEST_TIMEOUT_DEFAULT):
+    """Handshake check used by mcp_add BEFORE registration:
+    initialize + tools/list must succeed. Returns tool names.
+    Raises MCPError on any failure — the caller registers nothing."""
+    with _client_for(entry, timeout) as client:
+        tools = client.list_tools()
+    return [str(t.get("name", "")) for t in tools
+            if isinstance(t, dict)]
+
+
 def call_tool(params, _ticket_id):
     """Daemon entry point: params {server, tool, arguments}.
 
-    One call = one server process lifetime (launch, call, stop).
-    Long-lived sessions are a later optimization; process-per-call
-    keeps supervision trivial and failures isolated.
+    One call = one server session lifetime (launch/connect, call,
+    stop). Long-lived sessions are a later optimization;
+    session-per-call keeps supervision trivial and failures
+    isolated.
     """
     server_id = params.get("server")
     tool = params.get("tool")
@@ -211,6 +350,6 @@ def call_tool(params, _ticket_id):
         raise ValueError("mcp_call needs a tool name")
     entry = load_server_entry(server_id)
     timeout = params.get("timeout") or REQUEST_TIMEOUT_DEFAULT
-    with MCPClient(entry, timeout=timeout) as client:
+    with _client_for(entry, timeout) as client:
         result = client.call(tool, params.get("arguments") or {})
     return {"server": server_id, "tool": tool, "result": result}

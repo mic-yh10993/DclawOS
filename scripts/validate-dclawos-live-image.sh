@@ -594,6 +594,41 @@ grep -q 'normalize_channel' "$WORK/registrylib-p5-extract/usr/local/lib/dclawos/
 # NOTE: the settings channels-page assertion lives in the Phase 5
 # module 5 block above: the settings binary lands with that module.
 
+# Phase 5 module 4: agent self-provisioning (WS2). provisioninglib
+# + its gate test must ship; the MCP client must carry the HTTP
+# transport + handshake validator; the daemon must dispatch the
+# provisioning tools; git must be in the base package set (skill
+# git sources). Behavior is gated by hook 1008 (provisiontest).
+for lib in provisioninglib provisiontest mcpclient; do
+    unsquashfs -d "$WORK/${lib}-p5m4-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p5m4-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p5m4-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'def skill_install' "$WORK/provisioninglib-p5m4-extract/usr/local/lib/dclawos/provisioninglib.py" || {
+    echo "provisioninglib lacks skill_install" >&2
+    exit 1
+}
+grep -q 'def channel_manage' "$WORK/provisioninglib-p5m4-extract/usr/local/lib/dclawos/provisioninglib.py" || {
+    echo "provisioninglib lacks channel_manage" >&2
+    exit 1
+}
+grep -q 'MCPHttpClient' "$WORK/mcpclient-p5m4-extract/usr/local/lib/dclawos/mcpclient.py" || {
+    echo "mcpclient lacks the HTTP transport" >&2
+    exit 1
+}
+grep -q 'provisioninglib' "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" || {
+    echo "agent daemon lacks the provisioning dispatch" >&2
+    exit 1
+}
+grep -q 'provisiontest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
+    echo "hook 1008 lacks the provisiontest call" >&2
+    exit 1
+}
+grep -q '^git$' config/package-lists/dclawos-base.list.chroot || {
+    echo "git missing from base packages" >&2
+    exit 1
+}
+
 # Initramfs must contain live-boot (the live session depends on it).
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2

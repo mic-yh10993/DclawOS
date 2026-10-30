@@ -26,3 +26,13 @@ python3 /usr/local/lib/dclawos/agentlooptest.py
     exit 1
 }
 python3 /usr/local/lib/dclawos/channeltest.py
+
+# Phase 5 module 4: self-provisioning behavior gate. provisioninglib
+# against local fixtures only: skill install/remove with rollback,
+# MCP handshake-gated add over stdio AND streamable HTTP (mock
+# servers), channel management, registry env redaction, tiers.
+[ -f /usr/local/lib/dclawos/provisiontest.py ] || {
+    echo "dclawos-provtest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/provisiontest.py

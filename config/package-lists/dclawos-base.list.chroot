@@ -14,5 +14,6 @@ dbus
 network-manager
 ca-certificates
 curl
+git
 kbd
 xz-utils

@@ -77,6 +77,9 @@ TOOLS = (
     "route_decide", "mcp_call", "skill_run", "subagent",
     "takeover_request", "connector_send", "cron",
     "memory_save", "memory_search",
+    # Phase 5 WS2: self-provisioning (provisioninglib).
+    "registry_list", "skill_install", "skill_remove",
+    "mcp_add", "mcp_remove", "channel_manage",
 )
 
 
@@ -299,7 +302,26 @@ def classify(tool, params):
             return 2, "web_fetch needs an http(s) url"
         return 0, "read-only web fetch"
     if tool == "shell":
+        # WS2 audit G-21: the privilege model says deleting is
+        # tier 2, but a plain shell step could reach tier 1 with
+        # rm. The common delete argv shapes are tier 2 here; this
+        # is a guard on the obvious path, not a shell parser.
+        argv = params.get("argv")
+        if isinstance(argv, list) and argv and \
+                isinstance(argv[0], str) and \
+                os.path.basename(argv[0]) in (
+                    "rm", "rmdir", "unlink", "shred"):
+            return 2, "shell delete commands are tier 2"
         return 1, "shell commands are mutating by default"
+    if tool == "registry_list":
+        return 0, "registry discovery is read-only (env redacted)"
+    if tool in ("skill_install", "skill_remove", "mcp_add",
+                "mcp_remove"):
+        return 2, "self-provisioning defines future code execution"
+    if tool == "channel_manage":
+        if params.get("action") == "list":
+            return 0, "listing channels is read-only"
+        return 2, "channel management arms a message ingress path"
     if tool in ("service_restart", "package_install"):
         return 1, "system mutation via broker"
     if tool in ("mcp_call", "skill_run", "connector_send"):

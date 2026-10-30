@@ -121,6 +121,57 @@ TOOL_SCHEMAS = [
             "Send a message through a configured connector.",
             {"connector": _STR, "message": _STR},
             ("connector", "message")),
+    _schema("registry_list",
+            "List registered skills, MCP servers, connectors and "
+            "channels (env values redacted). Use this to discover "
+            "ids before calling them.",
+            {"kind": {"type": "string",
+                      "enum": ["skills", "mcp_servers",
+                               "connectors", "channels"]}}),
+    _schema("skill_install",
+            "Install a skill yourself from a local directory, a "
+            "local .tar.gz/.zip archive, an archive URL, or a git "
+            "URL. The package must contain SKILL.md and a runnable "
+            "command (or scripts/run.sh / skill.py / index.js). "
+            "A license string is REQUIRED and recorded with the "
+            "source as provenance. Validated before registering; "
+            "failures install nothing. Needs tier-2 approval.",
+            {"id": _STR, "source": _STR, "license": _STR,
+             "name": _STR, "description": _STR, "command": _STR,
+             "args": {"type": "array", "items": _STR}},
+            ("id", "source", "license")),
+    _schema("skill_remove",
+            "Remove a skill: drops its registry entry and, for "
+            "agent-installed skills, deletes the installed payload.",
+            {"id": _STR}, ("id",)),
+    _schema("mcp_add",
+            "Register an MCP server yourself: a stdio command or "
+            "an http(s) URL. The server must answer a live MCP "
+            "handshake (initialize + tools/list) before the entry "
+            "is kept; a failed validation registers nothing. env "
+            "values for secret-looking keys must be secret:<name> "
+            "references. A license string is REQUIRED. Needs "
+            "tier-2 approval.",
+            {"id": _STR, "license": _STR, "command": _STR,
+             "args": {"type": "array", "items": _STR},
+             "url": _STR, "env": _OBJ, "name": _STR,
+             "description": _STR},
+            ("id", "license")),
+    _schema("mcp_remove", "Remove a registered MCP server.",
+            {"id": _STR}, ("id",)),
+    _schema("channel_manage",
+            "Manage messaging channels: action list, add (kind + "
+            "optional allowlist; a human must still save the bot "
+            "token in Settings), remove, enable, disable, "
+            "set_allowlist. Tokens can never be set through this "
+            "tool.",
+            {"action": {"type": "string",
+                        "enum": ["list", "add", "remove", "enable",
+                                 "disable", "set_allowlist"]},
+             "channel": _STR, "kind": _STR, "name": _STR,
+             "options": _OBJ,
+             "allowlist": {"type": "array", "items": _STR}},
+            ("action",)),
 ]
 
 SCHEMA_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]

@@ -9,19 +9,25 @@ itself: it presents an APPROVED ticket (see ticketlib.py), and the
 broker executes exactly the ticketed operation with exactly the
 ticketed params — anything else is refused.
 
-Whitelist (module 5, deliberately small; it grows module by module
-together with the approval GUI):
+Whitelist (deliberately small; it grows module by module together
+with the approval GUI):
 - read-file: read a text file under /etc/dclawos/, /var/lib/dclawos/
   or /var/log/dclawos/ (symlinks resolved; 1 MB cap). Read-only.
 - service-status: systemctl is-active for a DclawOS-owned unit
   (dclawos-* only). Read-only.
 - restart-service: systemctl restart for a DclawOS-owned unit
-  (dclawos-* only). The only mutating op in module 5, bounded to
-  DclawOS's own services.
-Everything else (package install, system config writes, arbitrary
-commands) is refused until a later module whitelists it with GUI
-approval. The broker logs ticket id + operation + outcome only — never
-params contents and never ticket file contents.
+  (dclawos-* only).
+- package-install (Phase 3 M1): apt-get install of ONE package,
+  name shape-validated; the agent user's privilege model allows
+  installs, still ticketed here.
+- write-secret (Phase 3 M1): write a named secret to
+  /var/lib/dclawos/secrets/<name>, owner root, mode 0600; the
+  agent reads only its own named files back at runtime.
+Everything else (system config writes, arbitrary commands) is
+refused. The broker logs ticket id + operation + outcome only —
+never params contents and never ticket file contents.
+(Header corrected in Phase 5 WS2: the module-5 text above claimed
+package-install was refused — stale since Phase 3. Audit §2.)
 
 Reuse notes (evaluation cards §5, step 0 retrieval):
 - Ticket-gated execution follows the OpenClaw gateway approval PATTERN
