@@ -71,7 +71,8 @@ TASK_STATUSES = ("queued", "running", "done", "failed", "cancelled")
 # Tools the service dispatches. New tools must be added here AND in
 # dclawos-agent's dispatch table, with a classify() entry below.
 TOOLS = (
-    "shell", "read_file", "write_file", "list_files",
+    "shell", "read_file", "write_file", "edit_file", "list_files",
+    "process", "web_fetch",
     "service_status", "service_restart", "package_install",
     "route_decide", "mcp_call", "skill_run", "subagent",
     "takeover_request", "connector_send",
@@ -276,6 +277,26 @@ def classify(tool, params):
         if _is_under(os.path.realpath(path), agent_workspace()):
             return 1, "write inside workspace"
         return 2, "write outside agent workspace"
+    if tool == "edit_file":
+        path = params.get("path")
+        if not isinstance(path, str) or not path:
+            return 2, "edit_file needs a path"
+        if _is_under(os.path.realpath(path), agent_workspace()):
+            return 1, "edit inside workspace"
+        return 2, "edit outside agent workspace"
+    if tool == "process":
+        action = params.get("action")
+        if action in ("poll", "log"):
+            return 0, "process inspection is read-only"
+        if action in ("start", "kill"):
+            return 1, "process lifecycle mutates state"
+        return 2, "process needs a valid action"
+    if tool == "web_fetch":
+        url = params.get("url")
+        if not isinstance(url, str) or not url.startswith(
+                ("http://", "https://")):
+            return 2, "web_fetch needs an http(s) url"
+        return 0, "read-only web fetch"
     if tool == "shell":
         return 1, "shell commands are mutating by default"
     if tool in ("service_restart", "package_install"):

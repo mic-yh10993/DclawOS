@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(
 import agentlib  # noqa: E402
 
 POLL_SECONDS = 2
+MAX_PARALLEL = 3
 SHELL_TIMEOUT_DEFAULT = 120
 SHELL_OUTPUT_CAP = 8192
 READ_SIZE_CAP = 1024 * 1024
@@ -116,6 +117,102 @@ def _list_files(params):
     return {"path": path, "entries": names}
 
 
+def _edit_file(params):
+    path = params.get("path")
+    old = params.get("old_text")
+    new = params.get("new_text")
+    if not isinstance(path, str) or not path:
+        raise ValueError("edit_file needs a path")
+    if not isinstance(old, str) or not old:
+        raise ValueError("edit_file needs non-empty old_text")
+    if not isinstance(new, str):
+        raise ValueError("edit_file needs string new_text")
+    real = os.path.realpath(path)
+    with open(real, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    count = content.count(old)
+    if count == 0:
+        raise ValueError("edit_file: old_text not found")
+    if count > 1:
+        raise ValueError(
+            f"edit_file: old_text occurs {count} times, must be unique")
+    with open(real, "w", encoding="utf-8") as handle:
+        handle.write(content.replace(old, new, 1))
+    return {"path": real, "replacements": 1}
+
+
+PROCESSES = {}
+PROCESS_LOG_CAP = 8192
+
+
+def _process(params):
+    action = params.get("action")
+    if action == "start":
+        argv = params.get("argv")
+        if not isinstance(argv, list) or not argv or \
+                not all(isinstance(a, str) for a in argv):
+            raise ValueError("process start needs an 'argv' list")
+        import secrets as _secrets
+        proc_id = _secrets.token_hex(6)
+        log_path = f"/tmp/dclawos-process-{proc_id}.log"
+        log_handle = open(log_path, "ab")
+        proc = subprocess.Popen(
+            argv, cwd=agentlib.agent_workspace(),
+            stdout=log_handle, stderr=subprocess.STDOUT)
+        PROCESSES[proc_id] = {"proc": proc, "log": log_path,
+                              "argv": argv}
+        return {"process_id": proc_id, "pid": proc.pid,
+                "status": "running"}
+    proc_id = params.get("process_id")
+    entry = PROCESSES.get(proc_id or "")
+    if entry is None:
+        raise ValueError(f"unknown process_id: {proc_id!r}")
+    proc = entry["proc"]
+    if action == "poll":
+        code = proc.poll()
+        return {"process_id": proc_id,
+                "status": "running" if code is None else "exited",
+                "returncode": code}
+    if action == "log":
+        try:
+            with open(entry["log"], "rb") as handle:
+                data = handle.read()[-PROCESS_LOG_CAP:]
+            return {"process_id": proc_id,
+                    "log": data.decode("utf-8", "replace")}
+        except OSError as exc:
+            raise ValueError(f"process log unreadable: {exc}")
+    if action == "kill":
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return {"process_id": proc_id, "status": "killed"}
+    raise ValueError(f"unknown process action: {action!r}")
+
+
+def _web_fetch(params):
+    import re as _re
+    import urllib.request
+    url = params.get("url")
+    if not isinstance(url, str) or not url.startswith(
+            ("http://", "https://")):
+        raise ValueError("web_fetch needs an http(s) url")
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "DclawOS-agent/2.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read(1024 * 1024)
+        ctype = response.headers.get_content_type()
+    text = raw.decode("utf-8", "replace")
+    if ctype == "text/html":
+        text = _re.sub(r"<script[\s\S]*?</script>", " ", text)
+        text = _re.sub(r"<style[\s\S]*?</style>", " ", text)
+        text = _re.sub(r"<[^>]+>", " ", text)
+        text = _re.sub(r"\s+", " ", text).strip()
+    return {"url": url, "content_type": ctype,
+            "text": text[:PROCESS_LOG_CAP]}
+
+
 def _broker_tool(ticket_id, operation, params):
     reply = agentlib.broker_execute(ticket_id, operation, params)
     if not reply.get("ok"):
@@ -160,11 +257,18 @@ def _takeover_request(params):
     return {"request_id": request["id"], "outcome": "timeout"}
 
 
+MAX_SUBAGENT_DEPTH = 3
+
+
 def _subagent(params, task):
+    if int(task.get("depth", 0)) >= MAX_SUBAGENT_DEPTH:
+        raise ValueError(
+            f"subagent depth limit reached ({MAX_SUBAGENT_DEPTH})")
     goal = params.get("goal", "")
     steps = params.get("steps") or []
     child = agentlib.new_task(f"subagent of {task['id']}", goal, steps,
                               parent=task["id"])
+    child["depth"] = int(task.get("depth", 0)) + 1
     if not steps and goal:
         # Goal-only delegation runs the child as an LLM task with its
         # own conversation (Phase 4 module 2/5).
@@ -215,6 +319,12 @@ def execute_step(task, step):
         return _read_file(params)
     if tool == "write_file":
         return _write_file(params)
+    if tool == "edit_file":
+        return _edit_file(params)
+    if tool == "process":
+        return _process(params)
+    if tool == "web_fetch":
+        return _web_fetch(params)
     if tool == "list_files":
         return _list_files(params)
     if tool == "service_status":
@@ -449,15 +559,37 @@ def serve_forever():
         log("another dclawos-agent is already running; exiting")
         return 1
     log("dclawos-agent serving (polling task queue)")
+    # Phase 4 module 5: bounded concurrency. Up to MAX_PARALLEL
+    # tasks run at once (a parent waiting on an inline subagent no
+    # longer blocks unrelated tasks); approvals/events use atomic
+    # file writes, and each task touches only its own task file.
+    from concurrent.futures import ThreadPoolExecutor
+    executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL)
+    in_flight = {}
+
+    def _collect_done():
+        for tid in [t for t, f in in_flight.items() if f.done()]:
+            future = in_flight.pop(tid)
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001 - logged, not fatal
+                log(f"task {tid} crashed: {exc}")
+
     while True:
         try:
-            task = agentlib.next_queued_task()
-            if task is not None:
-                run_task(task)
-            else:
-                time.sleep(POLL_SECONDS)
+            _collect_done()
+            if len(in_flight) < MAX_PARALLEL:
+                task = agentlib.next_queued_task()
+                if task is not None and task["id"] not in in_flight:
+                    task["status"] = "running"
+                    agentlib.save_task(task)
+                    in_flight[task["id"]] = executor.submit(
+                        run_task, task)
+                    continue
+            time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:
             log("dclawos-agent stopping")
+            executor.shutdown(wait=False)
             return 0
         except Exception as exc:  # noqa: BLE001 - daemon must not die
             log(f"loop error (continuing): {exc}")

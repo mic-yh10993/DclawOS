@@ -52,8 +52,26 @@ TOOL_SCHEMAS = [
             {"path": _STR}, ("path",)),
     _schema("write_file", "Write a text file, creating parent dirs.",
             {"path": _STR, "content": _STR}, ("path", "content")),
+    _schema("edit_file",
+            "Replace the single exact occurrence of old_text with "
+            "new_text in a file. Fails if old_text is absent or not "
+            "unique.",
+            {"path": _STR, "old_text": _STR, "new_text": _STR},
+            ("path", "old_text", "new_text")),
     _schema("list_files", "List the entries of a directory.",
             {"path": _STR}),
+    _schema("process",
+            "Manage background shell processes: action start (argv), "
+            "poll, log or kill (process_id).",
+            {"action": {"type": "string",
+                        "enum": ["start", "poll", "log", "kill"]},
+             "argv": {"type": "array", "items": _STR},
+             "process_id": _STR},
+            ("action",)),
+    _schema("web_fetch",
+            "Fetch a web page over HTTP(S) and return its text "
+            "(size capped, tags stripped). Read-only.",
+            {"url": _STR}, ("url",)),
     _schema("service_status", "Report the status of a systemd service.",
             {"name": _STR}, ("name",)),
     _schema("service_restart",
