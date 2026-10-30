@@ -120,6 +120,33 @@ def _stage_local_dir(source, staging):
     shutil.copytree(source, staging)
 
 
+def _extract_tar_safely(archive, staging):
+    """Member-by-member tar extraction with the PEP 706 'data'
+    filter's core guarantees (no path escapes, no links/devices),
+    written out by hand: Debian bookworm ships Python 3.11.2,
+    whose tarfile has no filter= parameter (the build gate caught
+    exactly that — the dev sandbox runs 3.12)."""
+    base = os.path.realpath(staging)
+    for member in archive.getmembers():
+        target = os.path.realpath(os.path.join(base, member.name))
+        if target != base and not target.startswith(base + os.sep):
+            raise ProvisionError(
+                f"archive member escapes the target: "
+                f"{member.name!r}")
+        if member.isdir():
+            os.makedirs(target, exist_ok=True)
+        elif member.isfile():
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            extracted = archive.extractfile(member)
+            with open(target, "wb") as handle:
+                shutil.copyfileobj(extracted, handle)
+            os.chmod(target, (member.mode & 0o777) or 0o644)
+        else:
+            raise ProvisionError(
+                f"archive member type not allowed: "
+                f"{member.name!r}")
+
+
 def _stage_archive(source, staging):
     if os.path.getsize(source) > MAX_ARCHIVE_BYTES:
         raise ProvisionError("skill archive too large (>64MB)")
@@ -129,7 +156,7 @@ def _stage_archive(source, staging):
             archive.extractall(staging)
     else:
         with tarfile.open(source) as archive:
-            archive.extractall(staging, filter="data")
+            _extract_tar_safely(archive, staging)
 
 
 def _stage_git(url, staging):
