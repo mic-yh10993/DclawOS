@@ -292,7 +292,7 @@ if grep -v '^[[:space:]]*#' "$WORK/installer-extract/usr/local/bin/dclawos-insta
     echo "installer wrapper must not invoke pkexec" >&2
     exit 1
 fi
-if grep -q '/home/user' "$WORK/installer-extract/usr/local/bin/dclawos-installer"; then
+if grep -v '^[[:space:]]*#' "$WORK/installer-extract/usr/local/bin/dclawos-installer" | grep -q '/home/user'; then
     echo "installer wrapper still references 1.0 /home/user paths" >&2
     exit 1
 fi
@@ -353,11 +353,11 @@ grep -q '70-dclawos-autologin.conf' "$WORK/calamares-extract/usr/local/libexec/d
     echo "postinstall does not cancel live autologin" >&2
     exit 1
 }
-if grep -q 'gdm3' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh"; then
+if grep -v '^[[:space:]]*#' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh" | grep -q 'gdm3'; then
     echo "postinstall must not reference gdm3 (2.0 uses LightDM)" >&2
     exit 1
 fi
-if grep -q 'userdel.*dclaw-agent' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh"; then
+if grep -v '^[[:space:]]*#' "$WORK/calamares-extract/usr/local/libexec/dclawos-target-postinstall.sh" | grep -q 'userdel.*dclaw-agent'; then
     echo "postinstall must not delete dclaw-agent" >&2
     exit 1
 fi
