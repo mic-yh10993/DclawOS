@@ -3,21 +3,51 @@
 //
 // Usage:
 //   dclawos-route [--strategy S] [--provider P] [--model M]
+//     [--task T] [--mode-pack P] [--weights-json '{...}']
+//     [--router-strategy S] [--budget-cap N] [--budget-fallback F]
+//     [--telemetry-json '[{...}]']
 //   dclawos-route --catalog
 //   dclawos-route --selftest   (build-time behavior gate: exits non-zero
 //                               if the engine bundle is broken)
 // Prints a routing decision (or the catalog) as JSON. Never executes a
 // request and never contacts a gateway: this is offline ranking only.
+// Phase 3: decisions carry REAL 16-factor scores (basis
+// "autocombo-16-factor"); the --selftest gate below adds new assertions
+// alongside the Phase 2 ones, which are never weakened.
 "use strict";
 
-const { decideRouting, buildCatalog } = require(
-  "/usr/share/dclawos/engine/decision.js");
+const {
+  decideRouting,
+  buildCatalog,
+  DEFAULT_WEIGHTS,
+  validateWeights,
+  normalizeScoringWeights,
+  getModePack,
+  getModePackNames,
+  listStrategies,
+} = require("/usr/share/dclawos/engine/decision.js");
+
+function parseJsonFlag(flag, value) {
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    console.error(`dclawos-route: invalid JSON for ${flag}: ${err.message}`);
+    process.exit(2);
+  }
+}
 
 function parseArgs(argv) {
   const args = {
     strategy: undefined,
     provider: undefined,
     model: undefined,
+    task: undefined,
+    modePack: undefined,
+    weights: undefined,
+    routerStrategy: undefined,
+    budgetCap: undefined,
+    budgetFallback: undefined,
+    telemetry: undefined,
     catalog: false,
     selftest: false,
   };
@@ -26,11 +56,21 @@ function parseArgs(argv) {
     if (arg === "--strategy") args.strategy = argv[++i];
     else if (arg === "--provider") args.provider = argv[++i];
     else if (arg === "--model") args.model = argv[++i];
+    else if (arg === "--task") args.task = argv[++i];
+    else if (arg === "--mode-pack") args.modePack = argv[++i];
+    else if (arg === "--weights-json") args.weights = parseJsonFlag(arg, argv[++i]);
+    else if (arg === "--router-strategy") args.routerStrategy = argv[++i];
+    else if (arg === "--budget-cap") args.budgetCap = Number(argv[++i]);
+    else if (arg === "--budget-fallback") args.budgetFallback = argv[++i];
+    else if (arg === "--telemetry-json") args.telemetry = parseJsonFlag(arg, argv[++i]);
     else if (arg === "--catalog") args.catalog = true;
     else if (arg === "--selftest") args.selftest = true;
     else if (arg === "-h" || arg === "--help") {
       console.log(
         "usage: dclawos-route [--strategy S] [--provider P] [--model M]\n" +
+          "       [--task T] [--mode-pack P] [--weights-json '{...}']\n" +
+          "       [--router-strategy S] [--budget-cap N] [--budget-fallback F]\n" +
+          "       [--telemetry-json '[{...}]']\n" +
           "       dclawos-route --catalog | dclawos-route --selftest");
       process.exit(0);
     } else {
@@ -93,10 +133,93 @@ function selftest() {
       fail(`provider ${provider.id} has no models array`);
     }
   }
+  // ---- Phase 3 additions (new assertions only; Phase 2 checks above kept) ----
+  if (decision.basis !== "autocombo-16-factor") {
+    fail(`basis is not autocombo-16-factor: ${decision.basis}`);
+  }
+  if (!decision.factors || typeof decision.factors.quota !== "number" ||
+      typeof decision.factors.health !== "number" ||
+      typeof decision.factors.taskFit !== "number") {
+    fail("winning decision carries no real 16-factor detail");
+  }
+  if (!decision.ranked[0].factors || typeof decision.ranked[0].factors.costInv !== "number") {
+    fail("ranked entries carry no factors");
+  }
+  // 16-factor ranking sanity via telemetry: a healthy cheap candidate must
+  // outrank a dead expensive one (constructed input, no live providers).
+  const goodProvider = decision.ranked[0].provider;
+  const badProvider = decision.ranked[decision.ranked.length - 1].provider;
+  if (goodProvider !== badProvider) {
+    const tuned = decideRouting({
+      telemetry: [
+        { provider: goodProvider, quotaRemaining: 100, circuitBreakerState: "CLOSED",
+          costPer1MTokens: 0.1, p95LatencyMs: 100, latencyStdDev: 10, errorRate: 0 },
+        { provider: badProvider, quotaRemaining: 0, circuitBreakerState: "OPEN",
+          costPer1MTokens: 100, p95LatencyMs: 100000, latencyStdDev: 1000, errorRate: 1 },
+      ],
+    });
+    const goodIdx = tuned.ranked.findIndex((r) => r.provider === goodProvider);
+    const badIdx = tuned.ranked.findIndex((r) => r.provider === badProvider);
+    if (goodIdx === -1 || badIdx === -1 || !(goodIdx < badIdx)) {
+      fail(`16-factor sanity failed: healthy ${goodProvider} at ${goodIdx}, ` +
+        `dead ${badProvider} at ${badIdx}`);
+    }
+    if (!tuned.excluded.includes(badProvider)) {
+      fail(`OPEN provider ${badProvider} not reported in excluded`);
+    }
+  }
+  // Weight-sum validation (upstream autoCombo.test.ts mirror).
+  if (!validateWeights(DEFAULT_WEIGHTS)) {
+    fail("DEFAULT_WEIGHTS does not validate (sum != 1.0)");
+  }
+  // Mode-pack sanity: every pack exists and normalises to sum 1.
+  const packNames = getModePackNames();
+  if (!Array.isArray(packNames) || packNames.length === 0) {
+    fail("no mode packs listed");
+  }
+  for (const name of packNames) {
+    const pack = getModePack(name);
+    if (!pack || !validateWeights(normalizeScoringWeights(pack))) {
+      fail(`mode pack ${name} does not normalise to sum 1`);
+    }
+  }
+  // Strategy registry sanity: rules/cost/latency/sla-aware/lkgp present,
+  // nadir NOT registered by default (external HTTP API, offline path).
+  const strategyNames = listStrategies().map((s) => s.name);
+  for (const want of ["rules", "cost", "latency", "sla-aware", "lkgp"]) {
+    if (!strategyNames.includes(want)) fail(`strategy ${want} missing`);
+  }
+  if (strategyNames.includes("nadir")) {
+    fail("nadir strategy must not be registered by default");
+  }
+  // Unknown mode pack falls back without throwing.
+  let unknownPackOk = false;
+  try {
+    const d = decideRouting({ modePack: "__dclawos_no_such_pack__" });
+    unknownPackOk = d.provider.length > 0 && d.modePack === null;
+  } catch (err) {
+    fail(`unknown mode pack threw: ${err && err.message}`);
+  }
+  if (!unknownPackOk) fail("unknown mode pack did not fall back cleanly");
+  // BudgetExceededError path at the decision.ts level (strict, pinned pool).
+  let strictThrew = false;
+  try {
+    decideRouting({
+      provider: first,
+      budgetCap: 0.000001,
+      budgetFallback: "strict",
+      telemetry: [{ provider: first, costPer1MTokens: 100 }],
+    });
+  } catch (err) {
+    strictThrew = /BudgetExceededError|budget cap/.test(String(err && err.message));
+  }
+  if (!strictThrew) fail("strict budget cap did not throw BudgetExceededError");
   console.log(
     `dclawos-route --selftest OK: ${decision.ranked.length} providers ` +
       `ranked, ${catalog.providers.length} providers cataloged, ` +
-      `chose ${decision.provider}/${decision.model}`);
+      `chose ${decision.provider}/${decision.model} ` +
+      `(basis ${decision.basis}, ${packNames.length} mode packs, ` +
+      `${strategyNames.length} strategies)`);
 }
 
 function main() {
@@ -113,6 +236,13 @@ function main() {
     strategy: args.strategy,
     provider: args.provider,
     model: args.model,
+    taskType: args.task,
+    modePack: args.modePack,
+    weights: args.weights,
+    routerStrategy: args.routerStrategy,
+    budgetCap: args.budgetCap,
+    budgetFallback: args.budgetFallback,
+    telemetry: args.telemetry,
   });
   console.log(JSON.stringify(decision, null, 2));
 }
