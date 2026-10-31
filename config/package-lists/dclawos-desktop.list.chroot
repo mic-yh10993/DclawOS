@@ -17,6 +17,10 @@ python3-gi
 python3-websocket
 gir1.2-gtk-3.0
 gir1.2-wnck-3.0
+# Phase 6 M2: WebKitGTK 4.1 for the settings model WebView page
+# (Debian Bookworm package: gir1.2-webkit2-4.1, API 4.1 / libsoup3;
+# pulls libwebkit2gtk-4.1-0 as a dependency).
+gir1.2-webkit2-4.1
 gir1.2-gtksource-4
 libglib2.0-bin
 upower

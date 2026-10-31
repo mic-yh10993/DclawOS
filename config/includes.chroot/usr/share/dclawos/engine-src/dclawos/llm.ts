@@ -92,6 +92,33 @@ export interface LlmRequest {
   /** Per-provider endpoint override (custom/self-hosted endpoints;
    * mirrors upstream providerSpecificData.baseUrl). */
   baseUrlOverrides?: Record<string, string>;
+  // Phase 6 M2: routing parameters assembled by llmlib from the
+  // registry model_config; forwarded to decideRouting verbatim
+  // (DecideRoutingInput already supports every field — no new
+  // decision logic is added here).
+  // reuse-check: field set ADOPTED from decision.ts
+  //   DecideRoutingInput; this interface only carries them across.
+  strategy?: string;
+  routerStrategy?: string;
+  modePack?: string;
+  weights?: Record<string, number>;
+  budgetCap?: number;
+  budgetFallback?: "cheapest" | "strict";
+  explorationRate?: number;
+  sla?: {
+    targetP95Ms?: number;
+    maxErrorRate?: number;
+    maxCostPer1MTokens?: number;
+    hardConstraints?: boolean;
+  };
+  lastKnownGoodProvider?: string;
+  /** Custom-provider / added-model pricing from the registry,
+   * keyed "<provider>::<model>"; consulted by computeCost ahead
+   * of the vendored pricing table (M2). */
+  customPricing?: Record<
+    string,
+    { inputPer1M?: number | null; outputPer1M?: number | null }
+  >;
 }
 
 export interface CostEnvelope {
@@ -169,12 +196,31 @@ function buildHeaders(
 export function computeCost(
   provider: string,
   model: string,
-  usage: { prompt_tokens?: number; completion_tokens?: number } | undefined
+  usage: { prompt_tokens?: number; completion_tokens?: number } | undefined,
+  customPricing?: LlmRequest["customPricing"]
 ): { costUsd: number; priced: boolean } | null {
   if (!usage) return null;
   const prompt = Number(usage.prompt_tokens ?? 0);
   const completion = Number(usage.completion_tokens ?? 0);
   if (!Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+  // Phase 6 M2: registry custom pricing wins when both rates are
+  // present (a custom provider has no vendored pricing row; a
+  // partial pricing falls through to the table rather than
+  // silently zero-pricing the missing side).
+  const custom = customPricing?.[`${provider}::${model}`];
+  if (
+    custom &&
+    typeof custom.inputPer1M === "number" &&
+    typeof custom.outputPer1M === "number"
+  ) {
+    const customCost =
+      (prompt / 1_000_000) * custom.inputPer1M +
+      (completion / 1_000_000) * custom.outputPer1M;
+    return {
+      costUsd: Math.round(customCost * 1_000_000) / 1_000_000,
+      priced: true,
+    };
+  }
   const pricing = getModelPricing(provider, model);
   const cost =
     (prompt / 1_000_000) * pricing.inputCostPer1M +
@@ -277,6 +323,16 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
         role: m.role,
         content: m.content,
       })),
+      // Phase 6 M2 routing pass-through (see LlmRequest).
+      strategy: request.strategy,
+      routerStrategy: request.routerStrategy,
+      modePack: request.modePack,
+      weights: request.weights,
+      budgetCap: request.budgetCap,
+      budgetFallback: request.budgetFallback,
+      explorationRate: request.explorationRate,
+      sla: request.sla,
+      lastKnownGoodProvider: request.lastKnownGoodProvider,
     });
     const maxTargets = request.maxTargets ?? 3;
     const seen = new Set<string>();
@@ -326,7 +382,12 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
     const body = result.response as {
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
-    const computed = computeCost(served.provider, served.model, body.usage);
+    const computed = computeCost(
+      served.provider,
+      served.model,
+      body.usage,
+      request.customPricing
+    );
     if (computed) {
       costUsd = computed.costUsd;
       envelope = {
@@ -386,3 +447,11 @@ export {
   dispatchChaosFromCombo,
 } from "./qualityStore";
 import { recordQuality } from "./qualityStore";
+// Phase 6 M2: re-exported for the dclawos-llm --status inspect mode
+// (read-only; the settings host consumes its JSON). getQualitySnapshot
+// is upstream routing/quality via qualityStore's import surface;
+// getAllModelLockouts is accountFallback's in-process lockout list —
+// a fresh --status process honestly reports an empty list (see
+// docs/PHASE6.md M2 ledger for the cross-process limitation).
+export { getQualitySnapshot } from "../open-sse/services/routing/quality";
+export { getAllModelLockouts } from "../open-sse/services/accountFallback";

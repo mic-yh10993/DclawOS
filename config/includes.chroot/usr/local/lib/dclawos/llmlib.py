@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM client bridge (Phase 4 module 2, gap rows A1/A7).
+"""LLM client bridge (Phase 4 module 2, gap rows A1/A7; Phase 6 M2 wiring).
 
 The Python agent service talks to models only through the
 dclawos-llm CLI (Node, engine/llm.js): routing decision + dispatch +
@@ -18,15 +18,56 @@ Configuration (all local, GUI-managed; nothing calls a web UI):
   DCLAWOS_LLM_KEYS environment variable (never argv, never logged,
   never in task files), and the CLI never echoes them.
 
+Phase 6 M2 wiring (docs/PHASE6.md M2 ledger): the advanced model
+configuration lives in the unified registry (registrylib:
+providers = custom providers, model_config = routing / pins /
+fallback / builtin overrides). This module assembles the FULL
+request the engine already supports — strategy, routerStrategy,
+modePack, weights, budgetCap, budgetFallback, explorationRate,
+sla, lastKnownGoodProvider, maxTargets, ordered fallback targets,
+baseUrlOverrides (builtin override + custom provider endpoints),
+customPricing — from that registry. With NO model_config present
+the assembled request is exactly the pre-M2 request (same keys,
+same pin semantics), so existing callers are unaffected.
+
+Pin selection order (tested in modeltest.py):
+  explicit caller pin > per-task-type pin (model_config.pins)
+  > global default (settings ai-provider / ai-model).
+The subagent default pin is applied one level up, when the daemon
+creates the child task (dclawos-agent _subagent), and only when the
+child task carries no explicit pin of its own.
+
+Custom providers: the routing decision only knows builtin
+providers, so a custom pin/fallback target is passed as an explicit
+targets[] entry plus a baseUrlOverrides entry (runLlm executes
+explicit targets without a decision lookup); a custom provider is
+only ever targeted when a llm-<provider> key file exists. Disabled
+providers (custom disabled, or builtin override enabled=false) are
+excluded from assembled targets; an explicit caller pin is always
+honoured as-is (the caller asked for exactly that).
+
+Every completed call appends one record to the durable usage
+ledger (usagelib, /var/lib/dclawos/usage.jsonl); cost stays null
+when the engine returned no cost envelope.
+
 Mock/testing: DCLAWOS_LLM_BIN overrides the CLI path and
 DCLAWOS_LLM_BASE_URL_<PROVIDER> sets a per-provider endpoint
 override, so the build gate can point the whole path at a local
 mock OpenAI-compatible endpoint with a dummy key.
+
+// reuse-check: pin/routing field names ADOPTED from decision.ts
+  DecideRoutingInput and llm.ts LlmRequest (strategy,
+  routerStrategy, modePack, weights, budgetCap, budgetFallback,
+  explorationRate, sla, lastKnownGoodProvider, maxTargets,
+  targets, baseUrlOverrides); no parallel request vocabulary is
+  invented. Settings/secret handling is the pre-M2 code, unchanged
+  in semantics.
 """
 
 import json
 import os
 import subprocess
+import time
 
 import agentlib
 
@@ -49,6 +90,24 @@ def configured():
         "model": values.get("ai-model", ""),
         "mode": values.get("routing-mode") or "auto",
     }
+
+
+def model_config():
+    """The registry model_config singleton (defaults when absent).
+    Never raises: a broken registry degrades to defaults, which
+    reproduce the pre-M2 request shape."""
+    try:
+        import registrylib
+        data, _skipped = registrylib.load_registry()
+        return data.get("model_config") \
+            or registrylib.default_model_config(), data
+    except Exception:  # noqa: BLE001 - degrade to pre-M2 behaviour
+        try:
+            import registrylib
+            return registrylib.default_model_config(), {
+                "providers": [], "model_config": None}
+        except Exception:  # noqa: BLE001
+            return {}, {"providers": []}
 
 
 def available_keys():
@@ -83,6 +142,10 @@ def provider_configured():
     return bool(available_keys())
 
 
+def key_configured(provider):
+    return provider in available_keys()
+
+
 def base_url_overrides(providers):
     overrides = {}
     for provider in providers:
@@ -93,36 +156,205 @@ def base_url_overrides(providers):
     return overrides
 
 
-def call(messages, tools=None, task_type=None, provider=None,
-         model=None, targets=None, max_tokens=None):
-    """Run one model turn through dclawos-llm. Returns the result
-    dict {response, provider, model, attempts, fallbackCount,
-    costUsd, cost_envelope}. Raises ValueError on transport failure
-    (the loop records it as data; a failed call is never disguised
-    as a model reply)."""
+def resolve_pin(task_type=None, provider=None, model=None):
+    """Resolve the effective (provider, model, source) for a call.
+
+    Order: explicit caller pin > model_config pin for the task
+    type > global settings default. A pin level may supply only
+    one of provider/model; the other falls through to the next
+    level (per-field resolution, matching the pre-M2 behaviour
+    where provider and model were independent settings)."""
+    cfg, _data = model_config()
+    pins = cfg.get("pins") or {}
+    task_pin = pins.get(task_type or "default") or {}
+    settings = configured()
+    out_provider = provider or task_pin.get("provider") \
+        or settings["provider"] or None
+    out_model = model or task_pin.get("model") \
+        or settings["model"] or None
+    if provider:
+        source = "explicit"
+    elif task_pin.get("provider") or task_pin.get("model"):
+        source = "task-pin"
+    elif settings["provider"] or settings["model"]:
+        source = "global"
+    else:
+        source = "none"
+    return out_provider, out_model, source
+
+
+def _provider_maps(data, cfg):
+    """Return (custom_by_id, disabled_ids, override_by_id)."""
+    custom = {p["id"]: p for p in data.get("providers", [])}
+    overrides = cfg.get("provider_overrides") or {}
+    disabled = set()
+    for pid, entry in custom.items():
+        if not entry.get("enabled", True):
+            disabled.add(pid)
+    for pid, overlay in overrides.items():
+        if not overlay.get("enabled", True):
+            disabled.add(pid)
+    return custom, disabled, overrides
+
+
+def build_request(messages, tools=None, task_type=None, provider=None,
+                  model=None, targets=None, max_tokens=None):
+    """Assemble the dclawos-llm request dict. Pure assembly (keys
+    are consulted only for provider eligibility, never copied into
+    the request). Exposed for the headless gate (modeltest.py)."""
     keys = available_keys()
-    cfg = configured()
+    cfg, data = model_config()
+    settings = configured()
+    custom, disabled, overrides = _provider_maps(data, cfg)
     request = {
         "messages": messages,
         "taskType": task_type or "default",
     }
     if tools:
         request["tools"] = tools
+    pin_provider, pin_model, _source = resolve_pin(
+        task_type, provider, model)
+
+    # --- targets: caller targets win; else pin (when custom) +
+    #     configured fallback order; else let the engine decide.
+    assembled_targets = None
     if targets:
-        request["targets"] = targets
-    pin_provider = provider or cfg["provider"] or None
-    pin_model = model or cfg["model"] or None
-    if cfg["mode"] == "manual" or provider:
-        if pin_provider:
-            request["provider"] = pin_provider
-        if pin_model:
-            request["model"] = pin_model
-    overrides = base_url_overrides(set(keys) | set(
-        t["provider"] for t in (targets or [])))
-    if overrides:
-        request["baseUrlOverrides"] = overrides
+        assembled_targets = [dict(t) for t in targets]
+    else:
+        chain = []
+        if pin_provider and pin_provider in custom:
+            # A custom provider is invisible to decideRouting; it
+            # can only be served as an explicit target.
+            if pin_provider not in disabled and pin_provider in keys:
+                chain.append({"provider": pin_provider,
+                              "model": pin_model
+                              or (custom[pin_provider].get("models")
+                                  or [{}])[0].get("id", "")})
+        for item in cfg.get("fallback") or []:
+            pid = item.get("provider")
+            if not pid or pid in disabled or pid not in keys:
+                continue
+            entry = {"provider": pid, "model": item.get("model")}
+            if entry not in chain:
+                chain.append(entry)
+        if chain:
+            assembled_targets = chain
+    if assembled_targets:
+        request["targets"] = assembled_targets
+
+    # --- provider/model pins for the engine decision path.
+    # A custom pin must NOT be forwarded as provider= (decideRouting
+    # would reject an unknown provider); it travels via targets.
+    # Forwarding rule per field (preserves pre-M2 semantics for the
+    # global default, which the engine only honoured in manual
+    # mode): explicit and task-type pins always forward; the global
+    # default forwards only in manual mode or when targets were
+    # assembled (the decision is then skipped anyway).
+    task_pin = (cfg.get("pins") or {}).get(task_type or "default") or {}
+    forward_provider = bool(provider or task_pin.get("provider")
+                            or settings["mode"] == "manual"
+                            or assembled_targets)
+    forward_model = bool(model or task_pin.get("model")
+                         or settings["mode"] == "manual"
+                         or assembled_targets)
+    if forward_provider and pin_provider and pin_provider not in custom:
+        request["provider"] = pin_provider
+    if forward_model and pin_model:
+        request["model"] = pin_model
+
+    # --- routing parameters (only when actually configured, so a
+    #     default registry reproduces the pre-M2 request exactly).
+    if cfg.get("strategy"):
+        request["strategy"] = cfg["strategy"]
+    if cfg.get("routerStrategy"):
+        request["routerStrategy"] = cfg["routerStrategy"]
+    if cfg.get("modePack"):
+        request["modePack"] = cfg["modePack"]
+    if cfg.get("weights"):
+        request["weights"] = cfg["weights"]
+    if cfg.get("budgetCap") is not None:
+        request["budgetCap"] = cfg["budgetCap"]
+    if cfg.get("budgetFallback"):
+        request["budgetFallback"] = cfg["budgetFallback"]
+    if cfg.get("explorationRate") is not None:
+        request["explorationRate"] = cfg["explorationRate"]
+    if cfg.get("sla"):
+        request["sla"] = cfg["sla"]
+    if cfg.get("lastKnownGoodProvider"):
+        request["lastKnownGoodProvider"] = cfg["lastKnownGoodProvider"]
+    if cfg.get("maxTargets") is not None:
+        request["maxTargets"] = cfg["maxTargets"]
+
+    # --- endpoint overrides: env (tests) < builtin override <
+    #     custom provider baseUrl (most specific wins last).
+    relevant = set(keys) | {t["provider"] for t in
+                            (assembled_targets or [])}
+    if pin_provider:
+        relevant.add(pin_provider)
+    merged_overrides = base_url_overrides(relevant)
+    for pid in relevant:
+        overlay = overrides.get(pid)
+        if overlay and overlay.get("baseUrl"):
+            merged_overrides[pid] = overlay["baseUrl"]
+        if pid in custom and custom[pid].get("baseUrl"):
+            merged_overrides[pid] = custom[pid]["baseUrl"]
+    if merged_overrides:
+        request["baseUrlOverrides"] = merged_overrides
+
+    # --- custom pricing (consumed by llm.ts computeCost ahead of
+    #     the registry pricing table).
+    pricing = {}
+    for pid, entry in custom.items():
+        for m in entry.get("models", []):
+            if m.get("pricing"):
+                pricing[f"{pid}::{m['id']}"] = m["pricing"]
+    for pid, overlay in overrides.items():
+        for m in overlay.get("addModels", []):
+            if m.get("pricing"):
+                pricing[f"{pid}::{m['id']}"] = m["pricing"]
+    if pricing:
+        request["customPricing"] = pricing
     if max_tokens:
         request["maxTokens"] = max_tokens
+    return request
+
+
+def _record_usage(result, task_type, task_id, session):
+    try:
+        import usagelib
+        envelope = result.get("cost_envelope") or {}
+        usage = None
+        raw_usage = envelope.get("usage") if isinstance(
+            envelope, dict) else None
+        if isinstance(raw_usage, dict):
+            usage = {
+                "prompt_tokens": raw_usage.get("promptTokens", 0),
+                "completion_tokens": raw_usage.get(
+                    "completionTokens", 0),
+            }
+        usagelib.append_usage(
+            result.get("provider"), result.get("model"),
+            result.get("costUsd"), usage=usage,
+            attempts=len(result.get("attempts") or []),
+            task_id=task_id, session=session or "",
+            task_type=task_type, ok=result.get("response") is not None)
+    except Exception:  # noqa: BLE001 - ledger never breaks a call
+        pass
+
+
+def call(messages, tools=None, task_type=None, provider=None,
+         model=None, targets=None, max_tokens=None, task_id=None,
+         session=None):
+    """Run one model turn through dclawos-llm. Returns the result
+    dict {response, provider, model, attempts, fallbackCount,
+    costUsd, cost_envelope}. Raises ValueError on transport failure
+    (the loop records it as data; a failed call is never disguised
+    as a model reply)."""
+    keys = available_keys()
+    request = build_request(
+        messages, tools=tools, task_type=task_type,
+        provider=provider, model=model, targets=targets,
+        max_tokens=max_tokens)
     env = dict(os.environ)
     env["DCLAWOS_LLM_KEYS"] = json.dumps(keys)
     llm_bin = os.environ.get("DCLAWOS_LLM_BIN", LLM_BIN_DEFAULT)
@@ -143,4 +375,68 @@ def call(messages, tools=None, task_type=None, provider=None,
         raise ValueError("dclawos-llm output not valid JSON")
     if not isinstance(result, dict):
         raise ValueError("dclawos-llm output not an object")
+    _record_usage(result, task_type, task_id, session)
     return result
+
+
+def test_connection(provider, model=None):
+    """One minimal real request against a chosen provider/model
+    (M2 connectivity test). No key = no request is sent and no
+    success is fabricated. Returns {ok, configured, provider,
+    model, attempts, latency_ms, cost_usd, error}."""
+    if not provider:
+        return {"ok": False, "configured": False, "provider": None,
+                "model": model, "attempts": 0, "latency_ms": None,
+                "cost_usd": None, "error": "未选择供应商"}
+    if not key_configured(provider):
+        return {"ok": False, "configured": False, "provider": provider,
+                "model": model, "attempts": 0, "latency_ms": None,
+                "cost_usd": None,
+                "error": "未配置密钥：请先为该供应商保存 llm-"
+                         f"{provider} 密钥"}
+    cfg, data = model_config()
+    custom, _disabled, _overrides = _provider_maps(data, cfg)
+    use_model = model
+    if not use_model and provider in custom:
+        models = custom[provider].get("models") or []
+        use_model = models[0]["id"] if models else None
+    if provider in custom and not use_model:
+        return {"ok": False, "configured": True,
+                "provider": provider, "model": None, "attempts": 0,
+                "latency_ms": None, "cost_usd": None,
+                "error": "自定义供应商未配置任何模型"}
+    # The test targets EXACTLY the chosen provider/model: an
+    # explicit single target, so configured fallback chains cannot
+    # mask a failure of the tested target (or fake its success).
+    targets = [{"provider": provider, "model": use_model}] \
+        if use_model else None
+    started = time.time()
+    try:
+        result = call(
+            [{"role": "user", "content": "ping"}],
+            task_type="default", provider=provider, model=use_model,
+            targets=targets, max_tokens=8)
+    except ValueError as exc:
+        return {"ok": False, "configured": True, "provider": provider,
+                "model": use_model, "attempts": 0,
+                "latency_ms": int((time.time() - started) * 1000),
+                "cost_usd": None, "error": str(exc)[:300]}
+    latency = int((time.time() - started) * 1000)
+    attempts = result.get("attempts") or []
+    if result.get("response") is not None:
+        return {"ok": True, "configured": True,
+                "provider": result.get("provider") or provider,
+                "model": result.get("model") or use_model,
+                "attempts": len(attempts), "latency_ms": latency,
+                "cost_usd": result.get("costUsd"), "error": None}
+    error = None
+    if attempts:
+        last = attempts[-1]
+        error = last.get("error") or (
+            f"status {last.get('status')} "
+            f"({last.get('failureKind')})")
+    return {"ok": False, "configured": True,
+            "provider": result.get("provider") or provider,
+            "model": use_model, "attempts": len(attempts),
+            "latency_ms": latency, "cost_usd": result.get("costUsd"),
+            "error": error or "所有尝试均失败，无响应"}

@@ -41,7 +41,88 @@ const {
   isCreditsExhausted,
   setConnectionRateLimitUntil,
   getConnectionRateLimitUntil,
+  getQualitySnapshot,
+  getAllModelLockouts,
+  getProviderBreakerState,
+  qualityOf,
 } = require("/usr/share/dclawos/engine/llm.js");
+
+// Phase 6 M2: read-only status/inspect mode for the settings host.
+// Reuses the engine's own exports (quality snapshot, per-provider
+// breaker state, in-process model lockouts) plus the persisted
+// state files the engine writes (circuit-breakers.json is the
+// breakerStore snapshot; connection-rate-limits.json is the
+// dbAdapter file). Lockouts live in THIS process's memory, which
+// for a fresh --status invocation is empty by construction — the
+// output says so (lockouts_available) instead of implying none
+// exist in a long-lived process. No keys are read or printed.
+// reuse-check: status surface ADOPTED from the exports llm.ts
+//   already re-exports for the selftest gates (qualityOf,
+//   getProviderBreakerState) + the M2-added getQualitySnapshot /
+//   getAllModelLockouts re-exports; no state logic is duplicated.
+function statusMain() {
+  const fs = require("fs");
+  const stateDir =
+    process.env.DCLAWOS_ENGINE_STATE_DIR ||
+    process.env.DCLAWOS_STATE_DIR ||
+    "/var/lib/dclawos/engine-state";
+  const readJson = (name) => {
+    try {
+      return { data: JSON.parse(fs.readFileSync(`${stateDir}/${name}`, "utf8")), status: "ok" };
+    } catch (err) {
+      return { data: {}, status: err && err.code === "ENOENT" ? "missing" : "corrupt" };
+    }
+  };
+  let catalogProviders = [];
+  try {
+    const decision = require("/usr/share/dclawos/engine/decision.js");
+    catalogProviders = decision.buildCatalog().providers.map((p) => p.id);
+  } catch {
+    catalogProviders = [];
+  }
+  const quality = {};
+  try {
+    for (const q of getQualitySnapshot(500) || []) {
+      if (q && q.provider) quality[`${q.provider}::${q.model || ""}`] = q;
+    }
+  } catch {
+    // quality snapshot unavailable in this process: the host falls
+    // back to the persisted provider-quality.json section below.
+  }
+  const breakers = {};
+  for (const provider of catalogProviders) {
+    try {
+      const state = getProviderBreakerState(provider);
+      if (state) breakers[provider] = state;
+    } catch {
+      // per-provider breaker read is best effort
+    }
+  }
+  const breakerFile = readJson("circuit-breakers.json");
+  const limitFile = readJson("connection-rate-limits.json");
+  const qualityFile = readJson("provider-quality.json");
+  let lockouts = [];
+  try {
+    lockouts = getAllModelLockouts() || [];
+  } catch {
+    lockouts = [];
+  }
+  console.log(JSON.stringify({
+    source: "dclawos-llm --status",
+    quality,
+    quality_status: Object.keys(quality).length ? "ok" : qualityFile.status,
+    quality_file: qualityFile.data,
+    breakers,
+    breakers_file: breakerFile.data,
+    breakers_status: breakerFile.status,
+    rate_limits: limitFile.data,
+    rate_limits_status: limitFile.status,
+    lockouts,
+    lockouts_available: false,
+    lockouts_note:
+      "模型锁定状态保存在引擎进程内存中（accountFallback），跨进程不可见；此处只呈现已持久化的质量、断路器与限流数据。",
+  }));
+}
 
 function fail(message) {
   console.error(`dclawos-llm --selftest FAILED: ${message}`);
@@ -253,6 +334,10 @@ async function selftestFallback() {
 }
 
 async function main() {
+  if (process.argv.includes("--status")) {
+    statusMain();
+    return;
+  }
   if (process.argv.includes("--selftest-fallback")) {
     await selftestFallback();
     return;

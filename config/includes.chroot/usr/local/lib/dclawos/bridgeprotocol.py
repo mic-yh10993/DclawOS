@@ -55,11 +55,26 @@ SURFACE_COMMANDS = {
     # M2 (settings WebView): config reads/writes via settingslib /
     # registrylib on the host side; secret.set is the write-only
     # broker write-secret path (value never comes back).
+    # Phase 6 M2 adds the model.* verbs (docs/BRIDGE-PROTOCOL.md):
+    # catalog/override merge reads, custom-provider CRUD, builtin
+    # override save/reset, routing+pin config, health, connectivity
+    # test and usage aggregation. None of them is secret-bearing:
+    # provider keys cross ONLY via secret.set, exactly as before.
     "settings": {
         "settings.get": {"secret_params": False},
         "settings.set": {"secret_params": False},
         "secret.set": {"secret_params": True},
         "registry.list": {"secret_params": False},
+        "model.catalog": {"secret_params": False},
+        "model.provider.save": {"secret_params": False},
+        "model.provider.delete": {"secret_params": False},
+        "model.provider.override": {"secret_params": False},
+        "model.provider.reset": {"secret_params": False},
+        "model.config.get": {"secret_params": False},
+        "model.config.save": {"secret_params": False},
+        "model.health": {"secret_params": False},
+        "model.test": {"secret_params": False},
+        "model.usage": {"secret_params": False},
     },
     # M3 (chat WebView): send a message / load history. Replies are
     # delivered as events, not as command replies.

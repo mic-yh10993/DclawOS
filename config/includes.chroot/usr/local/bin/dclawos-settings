@@ -60,6 +60,27 @@ try:
 except ImportError:
     agentlib = None
 
+# Phase 6 M2: model settings WebView host dependencies.
+try:
+    import bridgeprotocol
+except ImportError:
+    bridgeprotocol = None
+
+try:
+    import llmlib
+except ImportError:
+    llmlib = None
+
+try:
+    import modellib
+except ImportError:
+    modellib = None
+
+try:
+    import usagelib
+except ImportError:
+    usagelib = None
+
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -67,6 +88,8 @@ from gi.repository import Gtk, Gio, GLib  # noqa: E402
 
 SCHEMA_ID = "org.dclawos.settings"
 CATALOG_PATH = "/usr/share/dclawos/engine/catalog.json"
+# Phase 6 M2: local WebView page (offline, no external resources).
+MODEL_PAGE_PATH = "/usr/share/dclawos/model-settings.html"
 
 
 def log(msg):
@@ -171,6 +194,7 @@ class SettingsApp(Gtk.Window):
         stack.add_titled(self.build_skills_panel(), "skills", "Skills 与 MCP")
         stack.add_titled(self.build_secrets_panel(), "secrets", "密钥")
         stack.add_titled(self.build_channels_panel(), "channels", "渠道")
+        stack.add_titled(self.build_model_panel(), "model", "模型设置")
         # P5-M7: the agent can change settings too (settings_set).
         # Re-read the shared file whenever this window gains focus
         # so agent-made changes appear without a restart. Writes
@@ -180,7 +204,378 @@ class SettingsApp(Gtk.Window):
 
     def _on_focus_in(self, _window, _event):
         self._refresh_from_store()
+        # Phase 6 M2: the model WebView also re-reads shared storage
+        # on focus (in addition to bus push, below).
+        self._push_model_event("settings", {"reason": "focus"})
         return False
+
+    # ------------------------------------------------ Phase 6 M2 host
+    # Model settings WebView host. The page is UNTRUSTED: every
+    # message is validated by bridgeprotocol (allowlist, surface,
+    # secret rules) and dispatched ONLY to the typed handlers in
+    # _model_dispatch. The host never evals page code; replies go
+    # back as JSON data for the page's __dclawosReceive function.
+    # // reuse-check: bridge envelope handling ADOPTED from
+    #   bridgeprotocol (validate_hello / validate_command /
+    #   make_reply / make_event / strip rules); secret writes reuse
+    #   this app's existing broker flow (_store_secret, the same
+    #   approval path as the secrets page) — no new secret channel.
+
+    def build_model_panel(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        try:
+            gi.require_version("WebKit2", "4.1")
+            from gi.repository import WebKit2
+        except (ImportError, ValueError) as exc:
+            label = Gtk.Label(
+                label=f"WebKitGTK 4.1 不可用（{exc}），模型设置 WebView "
+                      "无法加载；原有「AI 与模型」面板仍可使用基础设置。")
+            label.set_line_wrap(True)
+            label.set_halign(Gtk.Align.START)
+            box.pack_start(label, False, False, 0)
+            self.model_webview = None
+            return box
+        manager = WebKit2.UserContentManager()
+        manager.register_script_message_handler("dclawos")
+        manager.connect("script-message-received::dclawos",
+                        self._on_bridge_message)
+        webview = WebKit2.WebView()
+        try:
+            webview = WebKit2.WebView.new_with_user_content_manager(
+                manager)
+        except Exception:  # noqa: BLE001 - older binding shape
+            pass
+        self.model_webview = webview
+        if os.path.exists(MODEL_PAGE_PATH):
+            webview.load_uri("file://" + MODEL_PAGE_PATH)
+        else:
+            webview.load_html(
+                "<html><body><p>模型设置页面资源缺失："
+                + MODEL_PAGE_PATH + "</p></body></html>", "file:///")
+        box.pack_start(webview, True, True, 0)
+        # Push: subscribe to the M1 event bus; agent-side changes
+        # (settings/model/task events) are forwarded to the page,
+        # which re-reads the shared stores. This is subscription
+        # lifecycle (M1 semantics), not a polling timer.
+        try:
+            import eventbus
+            self._model_subscriber = eventbus.EventSubscriber(
+                self._on_bus_event_for_model).start()
+        except Exception as exc:  # noqa: BLE001 - push is additive
+            log(f"model page event subscription unavailable: {exc}")
+            self._model_subscriber = None
+        return box
+
+    def _on_bus_event_for_model(self, event):
+        try:
+            data = event.get("data") or {}
+            if isinstance(data, dict) and data.get("display") is False:
+                return  # bus-only signal, not a display event
+            self._push_model_event(event.get("type", "system"),
+                                   {"summary": event.get("summary", "")})
+        except Exception:  # noqa: BLE001 - forwarding is additive
+            pass
+
+    def _push_model_event(self, event_type, data):
+        if getattr(self, "model_webview", None) is None \
+                or bridgeprotocol is None:
+            return
+        try:
+            message = bridgeprotocol.make_event(event_type, data)
+        except Exception:  # noqa: BLE001
+            return
+        self._send_to_page(message)
+
+    def _send_to_page_raw_js(self, script):
+        webview = getattr(self, "model_webview", None)
+        if webview is None:
+            return
+
+        def _do():
+            try:
+                if hasattr(webview, "evaluate_javascript"):
+                    webview.evaluate_javascript(
+                        script, -1, None, None, None, None)
+                else:
+                    webview.run_javascript(script, None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+        GLib.idle_add(_do)
+
+    def _send_to_page(self, message):
+        webview = getattr(self, "model_webview", None)
+        if webview is None:
+            return
+        script = "window.__dclawosReceive && window.__dclawosReceive(" \
+            + json.dumps(message, ensure_ascii=False) + ");"
+
+        def _do():
+            try:
+                if hasattr(webview, "evaluate_javascript"):
+                    webview.evaluate_javascript(
+                        script, -1, None, None, None, None)
+                else:
+                    webview.run_javascript(script, None, None, None)
+            except Exception:  # noqa: BLE001 - page may be reloading
+                pass
+            return False
+
+        GLib.idle_add(_do)
+
+    def _on_bridge_message(self, _manager, js_result):
+        if bridgeprotocol is None:
+            return
+        try:
+            try:
+                value = js_result.get_js_value()
+                text = value.to_string()
+            except Exception:  # noqa: BLE001 - older binding shape
+                text = js_result.to_string()
+            message = json.loads(text)
+        except Exception:  # noqa: BLE001 - untrusted input
+            return
+        if isinstance(message, dict) and message.get("kind") == "hello":
+            try:
+                bridgeprotocol.validate_hello(message)
+            except bridgeprotocol.BridgeError as exc:
+                self._send_to_page(exc.to_error(None))
+                return
+            self._send_to_page(
+                bridgeprotocol.make_hello_ack("settings"))
+            # Dark palette for the page (UI-RULES token set).
+            try:
+                if settingslib is not None and \
+                        settingslib.get_setting("ui-dark"):
+                    self._send_to_page_raw_js(
+                        "document.body.classList.add('dark');")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            command = bridgeprotocol.validate_command(
+                message, "settings")
+        except bridgeprotocol.BridgeError as exc:
+            request_id = message.get("id") if isinstance(
+                message, dict) else None
+            self._send_to_page(exc.to_error(request_id))
+            return
+        verb = command["command"]
+        params = command["params"]
+        request_id = command["id"]
+        if verb in ("model.test", "secret.set"):
+            # Potentially slow (real request / human approval):
+            # run off the GTK thread, reply when done.
+            threading.Thread(
+                target=self._bridge_dispatch_async,
+                args=(request_id, verb, params), daemon=True).start()
+            return
+        self._bridge_dispatch_reply(request_id, verb, params)
+
+    def _bridge_dispatch_async(self, request_id, verb, params):
+        self._bridge_dispatch_reply(request_id, verb, params)
+
+    def _bridge_dispatch_reply(self, request_id, verb, params):
+        try:
+            result = self._model_dispatch(verb, params)
+        except Exception as exc:  # noqa: BLE001 - typed error reply
+            self._send_to_page(bridgeprotocol.make_error(
+                request_id, "handler_error", str(exc)[:500]))
+            return
+        self._send_to_page(bridgeprotocol.make_reply(
+            request_id, result))
+
+    def _catalog_providers(self):
+        catalog = self.load_catalog() or []
+        return catalog
+
+    def _model_catalog_result(self):
+        if registrylib is None:
+            raise ValueError("registrylib 不可用")
+        data, _skipped = registrylib.load_registry()
+        merged = registrylib.merged_providers(
+            self._catalog_providers(), data)
+        keys = llmlib.available_keys() if llmlib is not None else {}
+        by_id = {p["id"]: p for p in self._catalog_providers()}
+        for entry in merged:
+            entry["key_configured"] = entry["id"] in keys
+            source = by_id.get(entry["id"])
+            entry["catalog_models"] = (
+                source.get("models", []) if source else [])
+        return {"providers": merged}
+
+    def _save_registry_and_notify(self, data, summary):
+        registrylib.save_registry(data)
+        if agentlib is not None:
+            try:
+                agentlib.log_event("model", summary)
+            except Exception:  # noqa: BLE001 - event is additive
+                pass
+
+    def _model_dispatch(self, verb, params):
+        """Typed host handlers for the settings surface. Raises
+        ValueError with a readable message on bad input; nothing
+        here returns a secret value."""
+        if verb == "ping":
+            return {"pong": True}
+        if verb == "hello":
+            return bridgeprotocol.make_hello_ack("settings")
+        if verb == "settings.get":
+            if settingslib is None:
+                raise ValueError("settingslib 不可用")
+            key = params.get("key")
+            if key:
+                return {"key": key,
+                        "value": settingslib.get_setting(key)}
+            return {"settings": settingslib.load_settings()}
+        if verb == "settings.set":
+            if settingslib is None:
+                raise ValueError("settingslib 不可用")
+            key = params.get("key")
+            if not isinstance(key, str) or "value" not in params:
+                raise ValueError("settings.set 需要 key 与 value")
+            settingslib.set_setting(key, params["value"])
+            if agentlib is not None:
+                try:
+                    agentlib.log_event(
+                        "settings", f"settings {key} updated via "
+                        "model/settings host")
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"key": key, "value": params["value"]}
+        if verb == "secret.set":
+            name = params.get("name")
+            value = params.get("value")
+            if not isinstance(name, str) or not name.startswith(
+                    "llm-") or not isinstance(value, str) or not value:
+                raise ValueError(
+                    "secret.set 只接受 llm-<供应商> 名称与非空密钥值")
+            # Reuse the secrets page broker flow synchronously here
+            # (this handler already runs on a worker thread for
+            # secret.set): approval + broker write-secret, value
+            # never echoed in the reply.
+            import threading as _threading
+            done = _threading.Event()
+            holder = {}
+
+            def _work():
+                try:
+                    broker_params = {"name": name, "value": value}
+                    verdict, ticket_id = agentlib.request_approval(
+                        "write-secret", broker_params,
+                        f"保存密钥 {name}")
+                    if verdict != "approved":
+                        holder["text"] = f"未保存：审批结果 {verdict}"
+                    else:
+                        reply = agentlib.broker_execute(
+                            ticket_id, "write-secret", broker_params)
+                        holder["text"] = (
+                            f"密钥 {name} 已保存" if reply.get("ok")
+                            else f"保存失败：{reply.get('error')}")
+                except Exception as exc:  # noqa: BLE001
+                    holder["text"] = f"保存失败：{exc}"
+                finally:
+                    done.set()
+
+            _threading.Thread(target=_work, daemon=True).start()
+            done.wait(timeout=660)
+            text = holder.get("text", "保存超时")
+            return {"ok": text.endswith("已保存") or "已保存" in text,
+                    "message": text}
+        if verb == "registry.list":
+            if registrylib is None:
+                raise ValueError("registrylib 不可用")
+            data, skipped = registrylib.load_registry()
+            return {"counts": {k: len(v) for k, v in data.items()
+                               if isinstance(v, list)},
+                    "skipped": skipped}
+        if verb == "model.catalog":
+            return self._model_catalog_result()
+        if verb == "model.provider.save":
+            if registrylib is None:
+                raise ValueError("registrylib 不可用")
+            entry = params.get("provider")
+            if not isinstance(entry, dict):
+                raise ValueError("model.provider.save 需要 provider 对象")
+            builtin_ids = {p["id"] for p in self._catalog_providers()}
+            if entry.get("id") in builtin_ids:
+                raise ValueError(
+                    "内置供应商不能作为自定义供应商保存；请用覆盖层编辑")
+            data, _skipped = registrylib.load_registry()
+            saved = registrylib.upsert_provider(data, entry)
+            self._save_registry_and_notify(
+                data, f"custom provider saved: {saved['id']}")
+            return {"provider": saved}
+        if verb == "model.provider.delete":
+            if registrylib is None:
+                raise ValueError("registrylib 不可用")
+            pid = params.get("provider")
+            builtin_ids = {p["id"] for p in self._catalog_providers()}
+            if pid in builtin_ids:
+                raise ValueError(
+                    "内置供应商不能删除；可禁用或恢复默认（删除覆盖层）")
+            data, _skipped = registrylib.load_registry()
+            registrylib.remove_entry(data, "providers", pid)
+            self._save_registry_and_notify(
+                data, f"custom provider deleted: {pid}")
+            return {"deleted": pid}
+        if verb in ("model.provider.override", "model.provider.reset"):
+            if registrylib is None:
+                raise ValueError("registrylib 不可用")
+            pid = params.get("provider")
+            builtin_ids = {p["id"] for p in self._catalog_providers()}
+            if pid not in builtin_ids:
+                raise ValueError(f"不是内置供应商：{pid!r}")
+            data, _skipped = registrylib.load_registry()
+            cfg = dict(data.get("model_config")
+                       or registrylib.default_model_config())
+            overrides = dict(cfg.get("provider_overrides") or {})
+            if verb == "model.provider.reset":
+                overrides.pop(pid, None)
+                summary = f"provider override reset: {pid}"
+            else:
+                overlay = params.get("override")
+                overrides[pid] = registrylib.normalize_provider_override(
+                    overlay)
+                summary = f"provider override saved: {pid}"
+            cfg["provider_overrides"] = overrides
+            data["model_config"] = registrylib.normalize_model_config(cfg)
+            self._save_registry_and_notify(data, summary)
+            return {"provider": pid,
+                    "override": overrides.get(pid)}
+        if verb == "model.config.get":
+            if registrylib is None or settingslib is None:
+                raise ValueError("registrylib/settingslib 不可用")
+            data, _skipped = registrylib.load_registry()
+            return {"config": data.get("model_config"),
+                    "settings": settingslib.load_settings()}
+        if verb == "model.config.save":
+            if registrylib is None:
+                raise ValueError("registrylib 不可用")
+            raw = params.get("config")
+            # Validation happens BEFORE any write: a bad config
+            # raises here and nothing is persisted.
+            clean = registrylib.normalize_model_config(raw)
+            data, _skipped = registrylib.load_registry()
+            data["model_config"] = clean
+            self._save_registry_and_notify(
+                data, "model config saved via settings host")
+            return {"config": clean}
+        if verb == "model.health":
+            if modellib is None:
+                raise ValueError("modellib 不可用")
+            return modellib.health_status()
+        if verb == "model.test":
+            if llmlib is None:
+                raise ValueError("llmlib 不可用")
+            return llmlib.test_connection(
+                params.get("provider"), params.get("model"))
+        if verb == "model.usage":
+            if usagelib is None:
+                raise ValueError("usagelib 不可用")
+            return usagelib.aggregate_usage()
+        raise ValueError(f"未实现的桥动词：{verb}")
 
     def _refresh_from_store(self):
         self.settings.begin_sync()

@@ -60,3 +60,16 @@ DCLAWOS_SETTINGSTEST_REQUIRE_SIM=1 \
     exit 1
 }
 python3 /usr/local/lib/dclawos/eventbustest.py
+
+# Phase 6 module M2: model settings wiring gate. registrylib model
+# validation, CRUD -> llmlib request assembly, pin selection order,
+# full routing pass-through (fake dclawos-llm capturing the request
+# JSON + a local mock OpenAI-compatible endpoint), connectivity
+# success/failure/no-key, usage ledger aggregation (null cost kept
+# separate), bridge allowlist for the model.* verbs, and health
+# status tolerance for missing/corrupt engine state files.
+[ -f /usr/local/lib/dclawos/modeltest.py ] || {
+    echo "dclawos-modeltest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/modeltest.py

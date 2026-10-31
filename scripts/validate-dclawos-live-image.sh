@@ -809,6 +809,84 @@ grep -q 'eventbustest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.
     exit 1
 }
 
+# Phase 6 module M2: model settings completeness. The new libs +
+# gate test + WebView page must ship and compile; the WebKitGTK 4.1
+# typelib must be in the image (the settings host loads the page
+# through it); llmlib must carry the routing pass-through symbols;
+# the settings host must wire the WebView + bridge; the page must
+# follow the palette rules (no pure-black literal, no external
+# resources — comments stripped before the negative greps);
+# dclawos-llm must carry the --status inspect mode; hook 1008 must
+# run modeltest. Behavior is gated by hook 1008 (modeltest).
+for lib in modellib usagelib modeltest; do
+    unsquashfs -d "$WORK/${lib}-p6m2-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p6m2-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p6m2-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'gir1.2-webkit2-4.1' config/package-lists/dclawos-desktop.list.chroot || {
+    echo "package list lacks the WebKitGTK 4.1 package (M2)" >&2
+    exit 1
+}
+grep -qE '(^|/)usr/lib/x86_64-linux-gnu/girepository-1.0/WebKit2-4.1.typelib$' "$LIST" || {
+    echo "WebKit2 4.1 typelib missing from final image" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/modelpage-p6m2-extract" "$FS" usr/share/dclawos/model-settings.html >/dev/null 2>&1
+test -s "$WORK/modelpage-p6m2-extract/usr/share/dclawos/model-settings.html"
+python3 - "$WORK/modelpage-p6m2-extract/usr/share/dclawos/model-settings.html" <<'PYEOF'
+import re, sys
+page = open(sys.argv[1], encoding="utf-8").read()
+stripped = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.S)
+assert "#000" not in stripped, "model page uses pure black"
+for token in ("#f5f5f3", "#fcfcfb", "#0b0b0a", "#151515",
+              "#1a1a19", "#20201e"):
+    assert token in stripped, f"model page lost palette token {token}"
+assert "tabular-nums" in stripped, "model page lacks tabular-nums"
+assert "text-wrap:pretty" in stripped.replace(" ", ""), \
+    "model page lacks text-wrap:pretty"
+assert "grid-template-rows:0fr" in stripped.replace(" ", ""), \
+    "model page lacks the Grid 0fr->1fr fold"
+assert "box-shadow:inset0001px" in stripped.replace(" ", ""), \
+    "model page lacks the focus double ring"
+assert not re.search(r'(?:src|href)\s*=\s*"https?://', stripped), \
+    "model page references an external resource"
+assert "__dclawosReceive" in stripped, "model page lacks the bridge receiver"
+assert "model.config.save" in stripped, "model page does not save config via the bridge"
+PYEOF
+unsquashfs -d "$WORK/llmlib-p6m2-extract" "$FS" usr/local/lib/dclawos/llmlib.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/llmlib-p6m2-extract/usr/local/lib/dclawos/llmlib.py"
+for sym in build_request resolve_pin test_connection customPricing routerStrategy explorationRate; do
+    grep -q "$sym" "$WORK/llmlib-p6m2-extract/usr/local/lib/dclawos/llmlib.py" || {
+        echo "llmlib lacks M2 wiring symbol: $sym" >&2
+        exit 1
+    }
+done
+grep -q 'WebKit2' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings host does not load WebKit2 (M2 WebView missing)" >&2
+    exit 1
+}
+grep -q '_model_dispatch' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings host lacks the M2 bridge dispatch" >&2
+    exit 1
+}
+grep -q 'model.provider.save' "$WORK/bridgeprotocol-p6m1-extract/usr/local/lib/dclawos/bridgeprotocol.py" || {
+    echo "bridgeprotocol lacks the M2 model verbs" >&2
+    exit 1
+}
+grep -q -- '--status' "$WORK/llm-extract/usr/local/bin/dclawos-llm" || {
+    echo "dclawos-llm lacks the M2 --status inspect mode" >&2
+    exit 1
+}
+grep -q 'normalize_model_config' "$WORK/registrylib-extract/usr/local/lib/dclawos/registrylib.py" || {
+    echo "registrylib lacks the M2 model_config validation" >&2
+    exit 1
+}
+grep -q 'modeltest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
+    echo "hook 1008 lacks the modeltest call" >&2
+    exit 1
+}
+
 # Initramfs must contain live-boot (the live session depends on it).
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2

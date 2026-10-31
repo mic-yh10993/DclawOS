@@ -435,6 +435,25 @@ def _subagent(params, task):
         child["model"] = params["model"]
     if params.get("provider"):
         child["provider"] = params["provider"]
+    # Phase 6 M2: subagent default pin (registry model_config
+    # subagent_pin) applies only when the child carries no explicit
+    # pin of its own (explicit pin > subagent default > the normal
+    # llmlib resolution chain). // reuse-check: pin storage ADOPTED
+    # from registrylib.normalize_model_config's subagent_pin; the
+    # child task's provider/model fields are the pre-existing
+    # subagent pin channel (run_llm_task already forwards them).
+    if not child.get("provider") or not child.get("model"):
+        try:
+            import registrylib as _registrylib
+            _data, _skipped = _registrylib.load_registry()
+            _pin = (_data.get("model_config") or {}).get(
+                "subagent_pin") or {}
+            if _pin.get("provider") and not child.get("provider"):
+                child["provider"] = _pin["provider"]
+            if _pin.get("model") and not child.get("model"):
+                child["model"] = _pin["model"]
+        except Exception:  # noqa: BLE001 - default pin is additive
+            pass
     agentlib.save_task(child)
     agentlib.log_event("system",
                        f"subagent task {child['id']} started",
@@ -707,7 +726,9 @@ def run_llm_task(task):
             result = llmlib.call(
                 messages, tools=toolslib.tools_for_model(),
                 provider=task.get("provider"),
-                model=task.get("model"))
+                model=task.get("model"),
+                task_id=task.get("id"),
+                session=task.get("session"))
             response = result.get("response")
             if not response:
                 task["status"] = "failed"

@@ -70,13 +70,35 @@ refused with `unsupported_protocol` — never silently downgraded.
 | Surface | Verbs |
 |---|---|
 | host (all surfaces) | `hello`, `ping` |
-| settings (M2) | `settings.get`, `settings.set`, `secret.set` (secret-bearing), `registry.list` |
+| settings (M2) | `settings.get`, `settings.set`, `secret.set` (secret-bearing), `registry.list`, `model.catalog`, `model.provider.save`, `model.provider.delete`, `model.provider.override`, `model.provider.reset`, `model.config.get`, `model.config.save`, `model.health`, `model.test`, `model.usage` |
 | chat (M3) | `chat.send`, `chat.history` |
 | dashboard (M4) | `dashboard.snapshot`, `takeover.open`, `event.ack` |
 
 A verb allowlisted for one surface is refused on another.
 Adding a verb requires a registry entry here, a typed host
 handler, and a note in docs/PHASE6.md — in that order.
+
+## Settings model verbs (Phase 6 M2)
+
+All on the `settings` surface, implemented by typed handlers in
+the `dclawos-settings` host (`_model_dispatch`). Only `secret.set`
+is secret-bearing; every other verb refuses secret-looking params,
+and all replies/events pass the secret stripping in
+`bridgeprotocol.make_reply` / `make_event`.
+
+| Verb | Params | Reply | Secret? |
+|---|---|---|---|
+| `model.catalog` | `{}` | `{providers: [...]}` — engine catalog merged with custom providers + builtin overrides; each entry carries `builtin`, `enabled`, `baseUrl`, `format`, `models`, `has_override`, `key_configured` (bool only), `catalog_models` | no |
+| `model.provider.save` | `{provider: {id, name, baseUrl, format, models, enabled, ...}}` | `{provider: <normalised entry>}` — custom providers only; a builtin id is refused (use the override verbs) | no |
+| `model.provider.delete` | `{provider: <id>}` | `{deleted: <id>}` — custom only; builtin ids are refused with the disable/reset explanation | no |
+| `model.provider.override` | `{provider: <builtin id>, override: {enabled, baseUrl, addModels, hideModels}}` | `{provider, override}` — validated before persisting; bad input writes nothing | no |
+| `model.provider.reset` | `{provider: <builtin id>}` | `{provider, override: null}` — deletes the overlay (= restore defaults) | no |
+| `model.config.get` | `{}` | `{config: <model_config>, settings: <shared settings>}` | no |
+| `model.config.save` | `{config: <full model_config>}` | `{config: <normalised config>}` — `registrylib.normalize_model_config` validates first; an invalid config is refused and NOT persisted | no |
+| `model.health` | `{}` | engine status object (quality / breakers / rate_limits + per-section `*_status`, `lockouts`, `lockouts_available`, `lockouts_note`, `source`) | no |
+| `model.test` | `{provider, model}` | `{ok, configured, provider, model, attempts, latency_ms, cost_usd, error}` — one minimal real request; `configured: false` means no key exists and NO request was sent | no |
+| `model.usage` | `{}` | usage aggregation from `/var/lib/dclawos/usage.jsonl` (totals, per-provider / per-model rows, known vs unknown cost counts) | no |
+| `secret.set` | `{name: "llm-<provider>", value: <key>}` | `{ok, message}` — write-only via the existing approval + broker write-secret flow; the value never appears in any reply or event | **yes (write-only)** |
 
 ## Event forwarding shape
 
