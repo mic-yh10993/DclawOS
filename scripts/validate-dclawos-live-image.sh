@@ -722,6 +722,93 @@ grep -q '^git$' config/package-lists/dclawos-base.list.chroot || {
     exit 1
 }
 
+# Phase 6 module M1: event bus + bridge protocol + push freshness.
+# The libs and the gate test must ship and compile; the daemon must
+# serve the bus and wake on inotify; the dashboard/monitor must be
+# bus subscribers with NO display polling timers left in actual
+# code (comments/docstrings are stripped before the negative greps,
+# per the gate rule: assert code, not prose). Behavior is gated by
+# hook 1008 (eventbustest).
+for lib in eventbus bridgeprotocol eventbustest; do
+    unsquashfs -d "$WORK/${lib}-p6m1-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p6m1-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p6m1-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'PROTOCOL_VERSION = 1' "$WORK/eventbus-p6m1-extract/usr/local/lib/dclawos/eventbus.py" || {
+    echo "eventbus lacks protocol v1" >&2
+    exit 1
+}
+grep -q 'class EventBusServer' "$WORK/eventbus-p6m1-extract/usr/local/lib/dclawos/eventbus.py" || {
+    echo "eventbus lacks the server" >&2
+    exit 1
+}
+grep -q 'SURFACE_COMMANDS' "$WORK/bridgeprotocol-p6m1-extract/usr/local/lib/dclawos/bridgeprotocol.py" || {
+    echo "bridgeprotocol lacks the surface allowlists" >&2
+    exit 1
+}
+grep -q 'eventbus' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
+    echo "agentlib does not publish to the event bus" >&2
+    exit 1
+}
+# (agent daemon already extracted to $WORK/dclawos-agent-extract by
+# the Phase 3 block above; dashboard/monitor are extracted here.)
+for tool in dclawos-dashboard dclawos-monitor; do
+    unsquashfs -d "$WORK/${tool}-p6m1-extract" "$FS" "usr/local/bin/${tool}" >/dev/null 2>&1
+    test -x "$WORK/${tool}-p6m1-extract/usr/local/bin/${tool}"
+    python3 -m py_compile "$WORK/${tool}-p6m1-extract/usr/local/bin/${tool}"
+done
+grep -q 'EventBusServer' "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" || {
+    echo "agent daemon does not serve the event bus" >&2
+    exit 1
+}
+grep -q 'DirectoryWatcher' "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" || {
+    echo "agent daemon lacks the inotify task watcher" >&2
+    exit 1
+}
+grep -q 'EventSubscriber' "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard does not subscribe to the event bus" >&2
+    exit 1
+}
+grep -q 'EventSubscriber' "$WORK/dclawos-monitor-p6m1-extract/usr/local/bin/dclawos-monitor" || {
+    echo "monitor does not subscribe to the event bus" >&2
+    exit 1
+}
+# Negative checks on stripped code (python comments AND docstrings
+# removed by the tokenize-free trick below: drop comment text and
+# triple-quoted blocks via a small python filter).
+strip_py() {
+    python3 - "$1" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+src = re.sub(r'"""[\s\S]*?"""', '""', src)
+src = re.sub(r"'''[\s\S]*?'''", "''", src)
+lines = []
+for line in src.splitlines():
+    lines.append(line.split("#", 1)[0])
+sys.stdout.write("\n".join(lines))
+PYEOF
+}
+if strip_py "$WORK/dclawos-agent-extract/usr/local/bin/dclawos-agent" | grep -q 'POLL_SECONDS'; then
+    echo "agent daemon still carries the timed queue poll" >&2
+    exit 1
+fi
+if strip_py "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" | grep -q 'timeout_add'; then
+    echo "dashboard still has a display polling timer" >&2
+    exit 1
+fi
+if strip_py "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" | grep -q 'poll_takeover'; then
+    echo "dashboard still polls the takeover state" >&2
+    exit 1
+fi
+if strip_py "$WORK/dclawos-monitor-p6m1-extract/usr/local/bin/dclawos-monitor" | grep -q 'timeout_add'; then
+    echo "monitor still has a display polling timer" >&2
+    exit 1
+fi
+grep -q 'eventbustest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
+    echo "hook 1008 lacks the eventbustest call" >&2
+    exit 1
+}
+
 # Initramfs must contain live-boot (the live session depends on it).
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2

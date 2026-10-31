@@ -3,12 +3,18 @@
 
 Shows the AI's live operations as an event stream: commands run, files
 modified, tokens / model statistics, approvals, takeovers, system notes.
-Events arrive through /var/lib/dclawos/events.jsonl (one JSON object per
-line: ts, type, summary, session), written by the agent service (later
-modules) or by dclawos-log-event. The dashboard only READS the file — it
-never calls an agent API (cards §2 decoupling) — and refreshes on a 500ms
-tick, which is also the throttle: the UI never refreshes per-event, only
-per tick (cards §2 throttling row).
+
+Phase 6 M1 (push, per the user's 2026-10-31 directive): the dashboard
+SUBSCRIBES to the Unix-socket event bus (eventbus.py, served by the
+agent daemon). The durable events file (/var/lib/dclawos/events.jsonl,
+one JSON object per line: ts, type, summary, session) is read ONCE at
+startup for history; after that, freshness is event-driven only —
+bus events arrive on a subscriber thread and are marshalled into the
+GTK main loop with GLib.idle_add. There is no display timer. The
+takeover banner follows the same path: takeoverlib publishes a bus
+event on request creation/resolution, and the banner re-counts
+pending requests when such an event arrives. Bus-only signals
+(data.display False, e.g. task wakes) never become event rows.
 
 Reuse notes (evaluation cards §2, step 0 retrieval):
 - Dashboard shell itself: self-written. No reference repo has a desktop
@@ -22,10 +28,12 @@ Reuse notes (evaluation cards §2, step 0 retrieval):
   (routing_explanation, cost_envelope) into per-session statistics.
 // reuse-check: openclaw gateway session views NOT adopted, reason: they
   target the gateway web layer; the user forbids web management, so the
-  dashboard is a native GTK3 view over a local file.
-// reuse-check: no inotify binding is introduced, reason: Python stdlib
-  has no inotify; a 500ms mtime/size poll gives the same refresh cadence
-  as the notes' "inotify + 500ms aggregation" with zero new dependencies.
+  dashboard is a native GTK3 view over a local event bus.
+// reuse-check: GLib main-loop marshalling follows the repo's existing
+  GTK pattern (chat/settings use GLib.idle_add for cross-thread UI
+  updates); the bus subscriber itself is eventbus.EventSubscriber
+  (stdlib thread), reason: Gio's socket client would still need a
+  line protocol and retry loop that eventbus already owns.
 """
 import grp
 import json
@@ -43,15 +51,21 @@ from gi.repository import Gtk, GLib  # noqa: E402
 # absent the dashboard still works, it just never shows the banner.
 try:
     sys.path.insert(0, "/usr/local/lib/dclawos")
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "lib",
+        "dclawos"))
     import takeoverlib
+    import eventbus
 except ImportError:
     takeoverlib = None
+    eventbus = None
 
-EVENTS_PATH = "/var/lib/dclawos/events.jsonl"
-POLL_MS = 500
+EVENTS_PATH = os.environ.get("DCLAWOS_EVENTS_PATH",
+                             "/var/lib/dclawos/events.jsonl")
 MAX_ROWS = 500
 TYPE_LABELS = {
     "command": "命令",
+    "output": "输出",
     "file": "文件",
     "tokens": "tokens",
     "model": "模型",
@@ -74,6 +88,8 @@ def append_event(event):
         # Exchange file (module 7): the agent user must be able to
         # append too, so keep the file group-shared (best effort).
         _share_event_file()
+        if eventbus is not None:
+            eventbus.publish_event(event)
     except Exception as exc:
         log(f"event append failed (non-fatal): {exc}")
 
@@ -157,8 +173,14 @@ class Dashboard(Gtk.Window):
         self.offset = 0
         self.placeholder = None
         self.show_placeholder()
-        GLib.timeout_add(POLL_MS, self.poll_events)
-        GLib.timeout_add(POLL_MS, self.poll_takeover)
+        # Phase 6 M1: one-time history load, then bus subscription.
+        self.load_initial_events()
+        self.refresh_takeover()
+        self.subscriber = None
+        if eventbus is not None:
+            self.subscriber = eventbus.EventSubscriber(
+                self._on_bus_event_thread)
+            self.subscriber.start()
 
     def open_takeover(self, _button):
         try:
@@ -178,21 +200,38 @@ class Dashboard(Gtk.Window):
         except OSError as exc:
             log(f"editor launch failed: {exc}")
 
-    def poll_takeover(self):
+    def refresh_takeover(self):
+        """Re-count pending takeovers once. Called at startup and
+        on takeover bus events — never on a timer."""
         if takeoverlib is None:
-            return True
+            return False
         try:
             pending = takeoverlib.count_pending()
         except Exception as exc:
             log(f"takeover count failed: {exc}")
-            return True
+            return False
         if pending > 0:
             self.takeover_banner.set_label(
                 f"⚠ AI 需要你帮忙：{pending} 个接管请求待处理（点击处理）")
             self.takeover_revealer.set_reveal_child(True)
         else:
             self.takeover_revealer.set_reveal_child(False)
-        return True
+        return False
+
+    def _on_bus_event_thread(self, event):
+        # Subscriber thread: marshal into the GTK main loop.
+        GLib.idle_add(self.on_bus_event, event)
+
+    def on_bus_event(self, event):
+        if not isinstance(event, dict):
+            return False
+        if event.get("type") == "takeover":
+            self.refresh_takeover()
+        data = event.get("data")
+        if isinstance(data, dict) and data.get("display") is False:
+            return False  # bus-only signal, not an event row
+        self.add_event_row(event)
+        return False
 
     def show_placeholder(self):
         if self.placeholder is None:
@@ -208,25 +247,15 @@ class Dashboard(Gtk.Window):
                 pass
             self.placeholder = None
 
-    def poll_events(self):
-        try:
-            size = os.path.getsize(EVENTS_PATH)
-        except OSError:
-            return True
-        if size < self.offset:
-            # Stream truncated or rotated: restart from the beginning.
-            self.offset = 0
-        if size == self.offset:
-            return True
+    def load_initial_events(self):
+        """One-time history load at startup. Everything after this
+        arrives over the bus; the file is never re-read."""
         try:
             with open(EVENTS_PATH, "r", encoding="utf-8") as handle:
-                handle.seek(self.offset)
                 chunk = handle.read()
                 self.offset = handle.tell()
-        except OSError as exc:
-            log(f"event read failed: {exc}")
-            return True
-        added = 0
+        except OSError:
+            return
         for line in chunk.splitlines():
             line = line.strip()
             if not line:
@@ -235,32 +264,32 @@ class Dashboard(Gtk.Window):
                 event = json.loads(line)
             except ValueError:
                 continue
-            self.clear_placeholder()
-            ts = event.get("ts", 0)
-            try:
-                when = time.strftime("%H:%M:%S", time.localtime(int(ts)))
-            except (ValueError, TypeError):
-                when = "--"
-            kind = TYPE_LABELS.get(str(event.get("type", "")),
-                                   str(event.get("type", "")))
-            self.store.append((when, kind,
-                               str(event.get("summary", "")),
-                               str(event.get("session", ""))))
-            added += 1
-        if added:
-            # Cap the view (oldest rows drop) so a long session cannot
-            # grow the UI unboundedly — part of the throttling contract.
-            while len(self.store) > MAX_ROWS:
-                first = self.store.get_iter_first()
-                if first is None:
-                    break
-                self.store.remove(first)
+            self.add_event_row(event, scroll=False)
+
+    def add_event_row(self, event, scroll=True):
+        self.clear_placeholder()
+        ts = event.get("ts", 0)
+        try:
+            when = time.strftime("%H:%M:%S", time.localtime(int(ts)))
+        except (ValueError, TypeError):
+            when = "--"
+        kind = TYPE_LABELS.get(str(event.get("type", "")),
+                               str(event.get("type", "")))
+        self.store.append((when, kind,
+                           str(event.get("summary", "")),
+                           str(event.get("session", ""))))
+        # Cap the view (oldest rows drop) so a long session cannot
+        # grow the UI unboundedly.
+        while len(self.store) > MAX_ROWS:
+            first = self.store.get_iter_first()
+            if first is None:
+                break
+            self.store.remove(first)
+        if scroll and len(self.store) > 0:
             # Scroll to the newest row (dashboard semantics: live tail).
-            if len(self.store) > 0:
-                path = self.store.get_path(
-                    self.store.iter_nth_child(None, len(self.store) - 1))
-                GLib.idle_add(self.scroll_to, path)
-        return True
+            path = self.store.get_path(
+                self.store.iter_nth_child(None, len(self.store) - 1))
+            GLib.idle_add(self.scroll_to, path)
 
     def scroll_to(self, path):
         try:

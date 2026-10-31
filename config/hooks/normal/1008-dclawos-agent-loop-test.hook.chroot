@@ -48,3 +48,15 @@ python3 /usr/local/lib/dclawos/provisiontest.py
 }
 DCLAWOS_SETTINGSTEST_REQUIRE_SIM=1 \
     python3 /usr/local/lib/dclawos/settingstest.py
+
+# Phase 6 module M1: event bus + bridge protocol + live output gate.
+# eventbus server on a temp socket (subscriber delivery, durable log
+# still written, malformed input survives), bridgeprotocol
+# allowlist/secret rules, LIVE _run_shell chunk streaming from the
+# real daemon code, and the task wake path (save_task bus signal +
+# inotify watcher).
+[ -f /usr/local/lib/dclawos/eventbustest.py ] || {
+    echo "dclawos-eventbustest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/eventbustest.py

@@ -31,6 +31,8 @@ Concepts (evaluation cards §5/§6/§7/§9, user-confirmed 2026-10-29/30):
   in dclawos-approve; the CLI approve command stays test-only.
 - Events: JSON lines appended to /var/lib/dclawos/events.jsonl in the
   exact format dclawos-log-event writes (ts, type, summary, session).
+  Phase 6 M1: log_event also publishes each event to the Unix-socket
+  event bus (eventbus.py) best-effort; the file stays the durable log.
 - Secrets: /var/lib/dclawos/secrets/<name> (0600, dclaw-agent owned,
   written only via the broker write-secret op). Values are NEVER
   logged, NEVER put in events, NEVER echoed. read_secret is for the
@@ -139,10 +141,26 @@ def atomic_write(path, text, mode=0o660):
     os.replace(tmp, path)
 
 
-def log_event(event_type, summary, session=""):
-    """Append one event line. Never call with secret values."""
+def log_event(event_type, summary, session="", task_id=None,
+              data=None):
+    """Append one event line, then publish it to the event bus.
+
+    Never call with secret values. Phase 6 M1: events.jsonl stays
+    the DURABLE append log (written first); the bus publish is
+    best-effort freshness only — a dead bus never blocks or loses
+    the durable event. The envelope keeps ts/type/summary/session
+    and adds a unique id, plus task_id/data when the caller has
+    that context. Every producer that goes through this helper
+    (daemon, broker, provisioning, CLIs importing agentlib) reaches
+    the bus through the same path.
+    """
     event = {"ts": int(time.time()), "type": event_type,
-             "summary": summary, "session": session}
+             "summary": summary, "session": session,
+             "id": secrets.token_hex(8)}
+    if task_id:
+        event["task_id"] = task_id
+    if data is not None:
+        event["data"] = data
     path = events_path()
     try:
         parent = os.path.dirname(path)
@@ -157,6 +175,12 @@ def log_event(event_type, summary, session=""):
             pass
     except OSError:
         pass
+    try:
+        import eventbus  # local: eventbus never imports agentlib
+        eventbus.publish_event(event)
+    except Exception:  # noqa: BLE001 - publish is best-effort
+        pass
+    return event
 
 
 def stop_requested():
@@ -194,6 +218,24 @@ def save_task(task):
     task["updated_at"] = int(time.time())
     atomic_write(task_path(task["id"]),
                  json.dumps(task, indent=2, sort_keys=True) + "\n")
+    # Phase 6 M1: wake the daemon / refresh monitors via the bus,
+    # best-effort. This is a bus-only signal (data.display False):
+    # it is NOT written to events.jsonl and UIs must not render it
+    # as an event row. The file write above also fires the daemon's
+    # inotify watch, so a dead bus still wakes the daemon.
+    try:
+        import eventbus
+        eventbus.publish_event({
+            "ts": int(time.time()), "type": "task",
+            "summary": f"task {task['id']} {task.get('status', '')}",
+            "session": task.get("session", ""),
+            "task_id": task["id"],
+            "data": {"task_id": task["id"],
+                     "status": task.get("status"),
+                     "display": False, "wake": True},
+        })
+    except Exception:  # noqa: BLE001 - wake is best-effort
+        pass
 
 
 def load_task(task_id):

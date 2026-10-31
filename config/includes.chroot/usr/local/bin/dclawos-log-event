@@ -52,6 +52,15 @@ def main(argv=None):
     except OSError as exc:
         print(f"dclawos-log-event: write failed: {exc}", file=sys.stderr)
         return 1
+    # Phase 6 M1: publish to the event bus best-effort (the file
+    # above stays the durable log) so subscribed UIs refresh on
+    # this event instead of polling the file.
+    try:
+        sys.path.insert(0, "/usr/local/lib/dclawos")
+        import eventbus
+        eventbus.publish_event(event)
+    except Exception:  # noqa: BLE001 - publish is best-effort
+        pass
     return 0
 
 

@@ -105,6 +105,24 @@ def save_request(request):
         request_path(request["id"]),
         json.dumps(request, indent=2, sort_keys=True, ensure_ascii=False)
         + "\n")
+    # Phase 6 M1: push the change to the event bus so the dashboard
+    # takeover banner refreshes on the event, not on a timer. This
+    # single shared path covers creation (dclawos-agent,
+    # dclawos-takeover-request) and resolution (write_result below,
+    # the popup). Bus-only signal: not an events.jsonl row.
+    try:
+        import eventbus
+        eventbus.publish_event({
+            "ts": int(time.time()), "type": "takeover",
+            "summary": f"takeover request {request['id']} "
+                       f"{request.get('status', '')}",
+            "session": "",
+            "data": {"request_id": request["id"],
+                     "status": request.get("status"),
+                     "display": False},
+        })
+    except Exception:  # noqa: BLE001 - push is best-effort
+        pass
 
 
 def load_request(request_id):

@@ -4,15 +4,24 @@
 Shows the AI user's processes and gives the human the intervention
 controls (user-confirmed Q1: monitor AND intervene/stop both):
 - "叫停 AI": sets the cooperative stop flag (dclawos-agent-ctl stop).
-  The flag takes effect when the agent service checks it before each
-  action — the service lands in a later module, so until then the flag
-  is armed but nothing honors it yet (stated on screen, not hidden).
+  The agent service (Phase 3+) checks the flag before each action
+  and step, so a set flag stops new work at the next check.
 - "恢复 AI": clears the flag.
 - "强制结束 agent 进程": sudo pkill -u dclaw-agent, with a confirmation
   dialog. This one is immediate regardless of any service.
 The event stream itself lives on the AI dashboard; this window is for
 processes + stop controls only. Process listing via ps needs no sudo
 (read-only); the kill needs the live session's NOPASSWD sudo.
+
+Phase 6 M1 (push): freshness is event-driven. The process/stop
+snapshot is loaded ONCE at startup; after that the window refreshes
+only when a relevant event arrives on the event bus (task, system,
+approval, settings, takeover, stop, command, output, agent events —
+the things that can change the agent's process/stop state) or when
+the human presses a button. There is no display timer. Bus events
+arrive on a subscriber thread and are marshalled with
+GLib.idle_add (the repo's GTK pattern; the subscriber itself is
+eventbus.EventSubscriber).
 """
 
 import os
@@ -24,10 +33,21 @@ import gi  # noqa: E402
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib  # noqa: E402
 
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+try:
+    import eventbus
+except ImportError:
+    eventbus = None
+
 CTL = "dclawos-agent-ctl"
 STOP_FLAG = "/var/lib/dclawos/agent-stop.json"
 AGENT_USER = "dclaw-agent"
-POLL_MS = 2000
+REFRESH_EVENT_TYPES = frozenset({
+    "task", "system", "approval", "settings", "takeover", "stop",
+    "command", "output", "agent", "process",
+})
 
 
 def log(msg):
@@ -88,9 +108,9 @@ class MonitorApp(Gtk.Window):
         box.pack_start(buttons, False, False, 0)
 
         note = Gtk.Label(
-            label="说明：叫停标志是协作式停止，agent 服务接入后才生效"
-                  "（当前尚无 agent 服务，标志先行武装）；强制结束立即"
-                  "终止所有 agent 进程。事件流请看 AI 看板。")
+            label="说明：叫停标志是协作式停止，agent 服务在每个动作前"
+                  "检查该标志；强制结束立即终止所有 agent 进程。"
+                  "事件流请看 AI 看板。")
         note.set_line_wrap(True)
         note.set_halign(Gtk.Align.START)
         try:
@@ -114,7 +134,23 @@ class MonitorApp(Gtk.Window):
         box.pack_start(scrolled, True, True, 0)
 
         self.refresh()
-        GLib.timeout_add(POLL_MS, self.refresh)
+        self.subscriber = None
+        if eventbus is not None:
+            self.subscriber = eventbus.EventSubscriber(
+                self._on_bus_event_thread)
+            self.subscriber.start()
+
+    def _on_bus_event_thread(self, event):
+        # Subscriber thread: marshal into the GTK main loop, and
+        # only for event types that can change what this window
+        # shows (process list / stop state).
+        if isinstance(event, dict) and \
+                event.get("type") in REFRESH_EVENT_TYPES:
+            GLib.idle_add(self.refresh_from_bus)
+
+    def refresh_from_bus(self):
+        self.refresh()
+        return False
 
     def read_flag(self):
         flag_path = os.environ.get("DCLAWOS_STOP_FLAG", STOP_FLAG)

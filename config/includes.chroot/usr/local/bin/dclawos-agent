@@ -2,7 +2,12 @@
 """DclawOS agent service daemon (Phase 3 module 1; Phase 4 module 2).
 
 Runs as the dclaw-agent user via systemd (dclawos-agent.service).
-Polls the task queue (/var/lib/dclawos/tasks/) and executes tasks:
+Executes tasks from the task queue (/var/lib/dclawos/tasks/):
+Phase 6 M1 made the queue event-driven — the daemon serves the
+Unix-socket event bus (eventbus.py), is woken by inotify on the
+tasks directory and by bus task events, and streams shell output
+live as bus events. (Connector/channel inbound stays on its 30 s
+cycle: external services have no local push channel.)
 
 - kind "steps" (default): explicit tool steps (chat slash commands,
   assigned tasks, parent tasks), executed sequentially with approval
@@ -55,7 +60,14 @@ sys.path.insert(0, os.path.join(
 
 import agentlib  # noqa: E402
 
-POLL_SECONDS = 2
+# Phase 6 M1: the task queue is woken by inotify on the tasks
+# directory and by task events on the event bus (see serve_forever).
+# TASK_FALLBACK_SECONDS is a documented SAFETY FALLBACK only: if
+# inotify is unavailable, or a writer bypassed both the file watch
+# and the bus, a queued task is still picked up within this bound.
+# It is NOT the normal freshness path.
+TASK_FALLBACK_SECONDS = 30
+CONNECTOR_CYCLE_SECONDS = 30
 MAX_PARALLEL = 3
 SHELL_TIMEOUT_DEFAULT = 120
 SHELL_OUTPUT_CAP = 8192
@@ -66,24 +78,99 @@ def log(msg):
     print(f"dclawos-agent: {msg}", flush=True)
 
 
-def _run_shell(params):
+def _run_shell(params, context=None):
+    """Run one shell command, streaming output LIVE (Phase 6 M1).
+
+    stdout/stderr chunks are published as "output" events (via
+    agentlib.log_event, so they land in the durable log AND on the
+    bus) WHILE the process runs — reader threads drain the pipes
+    as data arrives, not after exit. Start/finish are "command"
+    events. The result contract is unchanged from the previous
+    subprocess.run implementation: {returncode, stdout, stderr}
+    with stdout/stderr tail-capped at SHELL_OUTPUT_CAP, and the
+    same ValueError messages for not-found / timeout / OSError.
+    Context (task_id, session, step, tool) rides in the events'
+    data where execute_step supplied it.
+    """
+    import threading as _threading
     argv = params.get("argv")
     if not isinstance(argv, list) or not argv or \
             not all(isinstance(a, str) for a in argv):
         raise ValueError("shell needs an 'argv' list of strings")
     cwd = params.get("cwd") or agentlib.agent_workspace()
     timeout = params.get("timeout") or SHELL_TIMEOUT_DEFAULT
+    context = context or {}
+    session = context.get("session", "")
+    task_id = context.get("task_id")
+
+    def _emit(stream, chunk):
+        agentlib.log_event(
+            "output",
+            f"shell {stream}: {chunk[:200]}",
+            session=session, task_id=task_id,
+            data={"stream": stream, "chunk": chunk,
+                  "tool": "shell", "step": context.get("step"),
+                  "task_id": task_id})
+
+    agentlib.log_event(
+        "command", f"shell started: {argv[0]}",
+        session=session, task_id=task_id,
+        data={"tool": "shell", "step": context.get("step"),
+              "task_id": task_id, "phase": "start"})
     try:
-        proc = subprocess.run(argv, cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout)
+        proc = subprocess.Popen(argv, cwd=cwd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
     except FileNotFoundError:
         raise ValueError(f"command not found: {argv[0]!r}")
-    except subprocess.TimeoutExpired:
-        raise ValueError(f"shell timed out after {timeout}s")
     except OSError as exc:
         raise ValueError(f"shell failed: {exc}")
-    out = (proc.stdout or "")[-SHELL_OUTPUT_CAP:]
-    err = (proc.stderr or "")[-SHELL_OUTPUT_CAP:]
+    captured = {"stdout": [], "stderr": []}
+
+    def _reader(stream_name, pipe):
+        try:
+            while True:
+                chunk = os.read(pipe.fileno(), 4096)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", "replace")
+                captured[stream_name].append(text)
+                try:
+                    _emit(stream_name, text)
+                except Exception:  # noqa: BLE001 - events are additive
+                    pass
+        except OSError:
+            pass
+
+    readers = [
+        _threading.Thread(target=_reader, args=("stdout", proc.stdout),
+                          daemon=True),
+        _threading.Thread(target=_reader, args=("stderr", proc.stderr),
+                          daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        for reader in readers:
+            reader.join(timeout=2)
+        raise ValueError(f"shell timed out after {timeout}s")
+    for reader in readers:
+        reader.join(timeout=5)
+    out = "".join(captured["stdout"])[-SHELL_OUTPUT_CAP:]
+    err = "".join(captured["stderr"])[-SHELL_OUTPUT_CAP:]
+    agentlib.log_event(
+        "command", f"shell finished: {argv[0]} rc={proc.returncode}",
+        session=session, task_id=task_id,
+        data={"tool": "shell", "step": context.get("step"),
+              "task_id": task_id, "phase": "finish",
+              "returncode": proc.returncode})
     return {"returncode": proc.returncode, "stdout": out, "stderr": err}
 
 
@@ -151,6 +238,15 @@ PROCESS_LOG_CAP = 8192
 
 
 def _process(params):
+    # Phase 6 M1 boundary (recorded in docs/PHASE6.md): the
+    # background `process` tool is NOT live-streamed. Its output
+    # goes to a per-process log file that the `log` action reads
+    # back — a shape callers already poll deliberately — and its
+    # lifecycle is detached from any step, so there is no step
+    # context to stream against. Making it genuinely live needs a
+    # reader-thread + log-cursor redesign of this store; faking it
+    # by re-emitting the log file on a timer was rejected. The
+    # foreground `shell` tool IS live (see _run_shell).
     action = params.get("action")
     if action == "start":
         argv = params.get("argv")
@@ -358,7 +454,7 @@ def _subagent(params, task):
             "error": current.get("error")}
 
 
-def execute_step(task, step):
+def execute_step(task, step, step_index=None):
     """Execute one step dict {tool, params}. Returns the step result.
 
     Approval is enforced here, not in the tools: tier 0 runs free,
@@ -403,7 +499,9 @@ def execute_step(task, step):
         if verdict != "approved":
             raise ValueError(f"approval {verdict} for {tool} ({reason})")
     if tool == "shell":
-        return _run_shell(params)
+        return _run_shell(params, context={
+            "task_id": task.get("id"), "session": task.get("session", ""),
+            "step": step_index, "tool": tool})
     if tool == "read_file":
         return _read_file(params)
     if tool == "write_file":
@@ -727,7 +825,8 @@ def run_task(task):
             agentlib.log_event("command", f"step {index}: {tool}",
                                session=task["session"])
             try:
-                results.append(execute_step(task, step))
+                results.append(execute_step(task, step,
+                                            step_index=index))
             except Exception as exc:  # noqa: BLE001 - step errors are data
                 task["status"] = "failed"
                 task["error"] = str(exc)
@@ -760,7 +859,10 @@ def run_task(task):
 # lose a delivery.
 # ------------------------------------------------------------------
 
-CONNECTOR_POLL_EVERY_CYCLES = 15
+# Connector/channel inbound runs on a time cycle in serve_forever
+# (CONNECTOR_CYCLE_SECONDS, Phase 6 M1): those are EXTERNAL services
+# with no local push channel, unlike the local task queue, which is
+# event-driven. Their cycle bound is unchanged in effect (30 s).
 
 
 def _connector_pending_path():
@@ -946,7 +1048,41 @@ def serve_forever():
     except (OSError, BlockingIOError):
         log("another dclawos-agent is already running; exiting")
         return 1
-    log("dclawos-agent serving (polling task queue)")
+    # Phase 6 M1: the daemon owns the event bus, and the task queue
+    # is woken by PUSH — inotify on the tasks directory plus task
+    # events arriving on the bus — not by a timed queue scan.
+    import select as _select
+    import eventbus
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+
+    def _wake():
+        try:
+            os.write(wake_w, b"\x01")
+        except OSError:
+            pass
+
+    def _on_bus_event(event):
+        if event.get("type") == "task":
+            _wake()
+
+    bus_server = None
+    try:
+        bus_server = eventbus.EventBusServer(
+            on_event=_on_bus_event).start()
+    except OSError as exc:
+        log(f"event bus unavailable (continuing): {exc}")
+    watcher = None
+    try:
+        agentlib.ensure_exchange_dir(agentlib.tasks_dir())
+        watcher = eventbus.DirectoryWatcher(agentlib.tasks_dir())
+    except OSError as exc:
+        # Documented fallback: with no inotify, the wait below
+        # times out every TASK_FALLBACK_SECONDS and the loop
+        # rescans — slower, never stuck.
+        log(f"inotify unavailable, fallback scan only: {exc}")
+    log("dclawos-agent serving (event-driven task queue)")
     # Phase 4 module 5: bounded concurrency. Up to MAX_PARALLEL
     # tasks run at once (a parent waiting on an inline subagent no
     # longer blocks unrelated tasks); approvals/events use atomic
@@ -963,7 +1099,7 @@ def serve_forever():
             except Exception as exc:  # noqa: BLE001 - logged, not fatal
                 log(f"task {tid} crashed: {exc}")
 
-    poll_cycle = 0
+    next_connector_at = 0.0
     while True:
         try:
             _collect_done()
@@ -974,9 +1110,9 @@ def serve_forever():
                 log(f"cron fire error (continuing): {exc}")
             try:
                 _flush_pending_replies()
-                poll_cycle += 1
-                if poll_cycle >= CONNECTOR_POLL_EVERY_CYCLES:
-                    poll_cycle = 0
+                if time.time() >= next_connector_at:
+                    next_connector_at = time.time() \
+                        + CONNECTOR_CYCLE_SECONDS
                     _poll_connectors()
                     _poll_channels()
             except Exception as exc:  # noqa: BLE001 - inbound is additive
@@ -989,14 +1125,42 @@ def serve_forever():
                     in_flight[task["id"]] = executor.submit(
                         run_task, task)
                     continue
-            time.sleep(POLL_SECONDS)
+            # Wait for a push wake-up: a bus task event (self-pipe),
+            # a tasks-directory change (inotify), a task finishing
+            # soon (short wait while work is in flight so done
+            # futures are collected), the next periodic connector
+            # cycle, or — the documented safety fallback — the
+            # fallback bound, whichever comes first.
+            if in_flight:
+                wait = 1.0
+            else:
+                wait = max(0.05, min(
+                    TASK_FALLBACK_SECONDS,
+                    next_connector_at - time.time()))
+            fds = [wake_r]
+            if watcher is not None:
+                fds.append(watcher.fileno())
+            try:
+                ready, _w, _x = _select.select(fds, [], [], wait)
+            except (OSError, ValueError):
+                ready = []
+            for fd in ready:
+                if fd == wake_r:
+                    try:
+                        os.read(wake_r, 4096)
+                    except OSError:
+                        pass
+                elif watcher is not None and fd == watcher.fileno():
+                    watcher.drain()
         except KeyboardInterrupt:
             log("dclawos-agent stopping")
             executor.shutdown(wait=False)
+            if bus_server is not None:
+                bus_server.stop()
             return 0
         except Exception as exc:  # noqa: BLE001 - daemon must not die
             log(f"loop error (continuing): {exc}")
-            time.sleep(POLL_SECONDS)
+            time.sleep(1)
 
 
 def main():
