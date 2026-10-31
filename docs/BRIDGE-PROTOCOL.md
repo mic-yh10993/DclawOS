@@ -72,7 +72,7 @@ refused with `unsupported_protocol` — never silently downgraded.
 | host (all surfaces) | `hello`, `ping` |
 | settings (M2) | `settings.get`, `settings.set`, `secret.set` (secret-bearing), `registry.list`, `model.catalog`, `model.provider.save`, `model.provider.delete`, `model.provider.override`, `model.provider.reset`, `model.config.get`, `model.config.save`, `model.health`, `model.test`, `model.usage` |
 | chat (M3) | `chat.state`, `chat.send`, `chat.history`, `chat.assign`, `chat.switch`, `chat.new`, `chat.model.set`, `chat.approve`, `chat.deny`, `chat.stop`, `chat.copy`, `chat.launch` |
-| dashboard (M4) | `dashboard.snapshot`, `takeover.open`, `event.ack` |
+| dashboard (M4) | `dashboard.state`, `dashboard.approve`, `dashboard.deny`, `dashboard.launch` |
 
 A verb allowlisted for one surface is refused on another.
 Adding a verb requires a registry entry here, a typed host
@@ -129,6 +129,34 @@ command/output step events, approval cards/verdicts), plus the
 host-synthesised `chat.task_done` reconciliation event (exactly
 once per finished known task, carrying the task result the page
 reconciles its streamed bubble against).
+
+## Dashboard verbs (Phase 6 M4)
+
+All on the `dashboard` surface, implemented by typed handlers in
+`dashboardlib.DashboardHost.dispatch` (the `dclawos-dashboard`
+WebView host is a thin GTK/WebKit shell around it). These verbs
+REPLACE the M1 registry placeholders (`dashboard.snapshot`,
+`takeover.open`, `event.ack`), which no host ever implemented.
+None is secret-bearing; approval params a page may see are
+redacted host-side (`bridgeprotocol.redact_params`, via the
+shared `chatlib.approval_card_view`) before they cross, and
+replies pass the bridge secret stripping as usual.
+
+| Verb | Params | Reply | Secret? |
+|---|---|---|---|
+| `dashboard.state` | `{}` | `{events, counts, usage, shell, takeovers, approvals, max_events}` — events = the one-time history snapshot from events.jsonl (file order, envelope ids kept for page-side dedupe), counts = task counts by status from agentlib (running / waiting=queued / done / failed / cancelled), usage = usagelib aggregation (known cost summed, null-cost calls counted separately as unknown — never 0), shell = the taskbar four-state view, takeovers / approvals = pending views | no |
+| `dashboard.approve` / `dashboard.deny` | `{ticket_id}` | `{ticket_id, status}` — the host writes the verdict through `chatlib.apply_verdict`, the ONE shared write (status / approved_by="human-gui" / approved_at via ticketlib) used by dclawos-approve and the chat host; no other verdict channel exists, and there is NO task-scoped grant verb: ticketlib is a per-operation single-ticket model (see docs/PHASE6.md M4, scoped approval is a queued item) | no |
+| `dashboard.launch` | `{target: takeover\|monitor\|chat\|dashboard\|settings\|editor\|approve}` | `{launched}` — host-side Popen of the sibling app (the takeover banner's click path is `target: "takeover"`) | no |
+
+Pushed events to the dashboard page: every display event-bus
+event (deduped host-side against the history snapshot by
+envelope id), forwarded as a bridge `event` whose `type` is the
+bus event's type and whose `data` is the full bus envelope
+(secret-stripped); plus the host-synthesised `approval.card`
+items (redacted card payloads / verdict notices) and
+`dashboard.counts` items (counts + usage + shell state +
+pending takeovers/approvals, recomputed by the host when a
+relevant bus event arrives — the page never polls).
 
 ## Event forwarding shape
 

@@ -577,6 +577,188 @@ agentlooptest pass unchanged.
 - The `process` tool's live output remains the M1
   DEFERRED-NAMED item; step cards show shell steps' live output.
 
+## M4 — Dashboard WebView + taskbar agent state + approval overlay
+
+State: **CLOSED** (this module; build verification in the ledger
+row below).
+
+### Dashboard WebView (page state)
+
+- `dclawos-dashboard` is now a WebKit2 4.1 host in the M2/M3
+  pattern (typed bridge dispatch, bus subscription forwarding,
+  focus re-read; WebKit missing → explanatory label, no second
+  UI). All logic lives in the new headless `dashboardlib
+  .DashboardHost`; the GTK4 shell migration stays M5. The binary
+  name and launch entry are unchanged, and the startup
+  "dashboard started" event write is kept.
+- Page: `usr/share/dclawos/dashboard.html`, a single local file,
+  no external resources. It carries everything the GTK dashboard
+  showed, with the same semantics: the durable events file is
+  read ONCE at host construction for history; after that the
+  timeline is bus events only (no display timer anywhere, the
+  file is never re-read).
+- Snapshot/live seam: the host seeds an `EventDeduper` with the
+  history envelope ids; a live event already in the snapshot is
+  dropped, a new one is appended exactly once
+  (`dashboardlib.merge_events` is the pure form, gate-tested).
+  Id-less legacy events dedupe on a (ts, type, summary, session,
+  task_id) fingerprint. The page dedupes again by the same key
+  as a second line of defence.
+- Counts area: running / waiting (queued) / done / failed task
+  counts from `agentlib.list_tasks`, plus token totals and cost
+  from `usagelib.aggregate_usage` — known cost summed, null-cost
+  calls counted separately as unknown and NEVER rendered as 0.
+  Counts are recomputed BY THE HOST when a relevant bus event
+  arrives and pushed as `dashboard.counts`; neither the page nor
+  the host polls on a timer.
+- Takeover banner: a Grid-fold banner on the page, shown when
+  `takeoverlib` has pending requests; clicking it launches
+  `dclawos-takeover` via `dashboard.launch` (the pre-M4 banner's
+  launch path, kept). Its count is seeded once from the store
+  and afterwards maintained from bus takeover events.
+
+### Taskbar agent state (four-state reduction table)
+
+`dclawos-shell` gains ONE element — an agent-state indicator
+(dot + label) — and a bus subscription. Slot geometry, the 48px
+height (`TASKBAR_HEIGHT = 48`) and the `_NET_WM_STRUT_PARTIAL`
+reservation are byte-untouched (the shell diff is additions
+only; the validator asserts both). Clicking the indicator opens
+the dashboard through the existing slot machinery.
+
+The state is `dashboardlib`'s pure reducer (shared with the
+dashboard host, so the two surfaces cannot disagree). It is
+seeded ONCE from the stores (`initial_shell_state`: pending
+ticket ids, pending takeover ids, running task ids) and after
+that moves ONLY by reducing bus events — no store is re-read
+periodically. Priority is by set, and clearing the top set falls
+back to the next level, never past a still-pending one:
+
+| Priority | State | Label | Enters when | Clears when |
+|---|---|---|---|---|
+| 1 (highest) | attention | 需要你 | a takeover request is pending (takeover event, status pending) | that request resolves (done / failed / cancelled) |
+| 2 | approval | 等待批准 | an approval is pending (approval event with a ticket_id and no verdict) | the verdict event (approved / denied) for that ticket |
+| 3 | thinking | 思考中 | a task is active (task signal queued/running, or llm / command / output activity for a task/session) | the task's terminal signal (done / failed / cancelled) or terminal system event |
+| 4 | idle | 空闲 | none of the above | — |
+
+The waiting states (approval / attention) breathe: a GLib timer
+toggles ONLY the indicator's opacity (animation frames). It
+reads no data and no files — recorded here because the timer's
+presence must not be mistaken for a poll.
+
+### Approval overlay (scope + the scoped-approval queue record)
+
+- The overlay is a modal card ON THE DASHBOARD PAGE. When an
+  approval event arrives, the host builds the card from the
+  event's structured data via the shared
+  `chatlib.approval_card_from_event` / `approval_card_view`:
+  real tool name, tier, summary and params REDACTED host-side
+  (`redact_params`) before they cross the bridge — never parsed
+  out of the summary text. Cards seeded from the ticket store at
+  startup carry the ticket's operation + params_summary and
+  params `{}` — ticket files hold only the params hash and
+  summary (ticketlib contract), so no raw params exist to show;
+  none are fabricated.
+- The card shows a risk band coloured by tier and exactly TWO
+  buttons, 批准 / 拒绝, decided via `dashboard.approve` /
+  `dashboard.deny` → `chatlib.apply_verdict` — the verdict write
+  EXTRACTED in M4 from the chat host into one shared function
+  (status / approved_by="human-gui" / approved_at /
+  ticketlib.save_ticket, field-for-field dclawos-approve). The
+  chat host now delegates to the same function; there is no
+  third copy and no second verdict channel. After a verdict the
+  overlay closes and the timeline, counts and taskbar state all
+  update from the same event flow.
+- **Scoped approval — QUEUED, not shipped (honesty record).**
+  A third button ("本次任务允许" / approve-for-this-task) was
+  evaluated and NOT built: the ticket model is per-operation
+  single-ticket (`ticketlib.new_ticket(operation, params,
+  summary, ttl)` binds ONE operation + params hash; the broker
+  validates exactly that), and there is NO task-level
+  authorisation carrier anywhere in ticketlib / agentlib /
+  the broker to honour such a grant. Faking the button would
+  promise a grant nothing enforces. "范围授权 (scoped
+  approval)" is therefore recorded here as a still-queued item
+  for the P0 / usability stage — it needs a ticket-model
+  extension (scoped grant record + broker/agentlib honouring
+  it) before any UI may offer it. (This record lives in this
+  ledger; the repo has no docs/UI-FUNCTIONS.md file.)
+
+### Bridge verbs (dashboard surface, M4)
+
+`dashboard.state`, `dashboard.approve`, `dashboard.deny`,
+`dashboard.launch` — registered in bridgeprotocol first (they
+replace the never-implemented M1 placeholders
+`dashboard.snapshot` / `takeover.open` / `event.ack`),
+implemented in dashboardlib, documented in
+docs/BRIDGE-PROTOCOL.md, called by the page last.
+
+### UI rules on the dashboard page (deviations named)
+
+Rules 1, 2, 3, 5, 6, 7, 8, 9, 10 are executed verbatim in native
+web form (palette tokens, double-ring focus, dark weights
+360/560, inline-icon -0.125em, tabular-nums, Grid 0fr→1fr fold
+for the takeover banner, text-wrap:pretty, over/under-damped
+motion tokens, 2.5 s self-extinguishing toast). Rule 4 applies
+to the page's llm rows: streamed delta text reveals with the
+native 90 ms blur(6px) keyframe and 30 ms stagger (cycled every
+24 chars); non-streamed rows render plainly, which is the
+rule's honest scope (it governs streaming text, as on the M3
+chat page). No other deviation.
+
+### Tests
+
+- New headless gate `dashboardtest.py`, run by hook 1008 and
+  locally: (a) snapshot construction from fixtures — task
+  counts by status, usage aggregation with the null-cost split,
+  history order, and the snapshot/live seam (merge_events +
+  host dedupe by envelope id, duplicate dropped, new event
+  admitted exactly once); (b) the shell reducer's full
+  transition chain idle → thinking → approval → attention →
+  level-by-level fallback, re-delivery idempotence,
+  auto-approved events never pending, input never mutated;
+  (c) the overlay payload — a secret-shaped param never appears
+  in clear text in the serialised host payload, tool name and
+  non-sensitive params stay visible, store-seeded cards carry
+  params {} honestly, and dashboard.approve/deny write exactly
+  the dclawos-approve fields; (d) pending-count seeding from
+  the stores plus event-only increments walking the state back
+  down to idle. Plus the bridge allowlist (M4 verbs refused on
+  other surfaces; retired placeholders refused) and
+  dashboard.launch targets. Gate-first evidence: with the
+  reducer's priority order deliberately swapped, dashboardtest
+  fails ("pending approval did not outrank thinking"); restored,
+  it passes — one side changed, same artifact re-run.
+- Validate script: M4 static block (dashboardlib/dashboardtest
+  ship + compile, page palette/rule/no-external assertions on
+  comment-stripped text, host WebKit2 wiring + a stripped-code
+  no-`timeout_add` check, bridge dashboard verbs, hook 1008
+  registration) plus taskbar geometry guards
+  (`TASKBAR_HEIGHT = 48` and `_NET_WM_STRUT_PARTIAL` still
+  present, reducer wiring present). The three pre-M4 assertions
+  that pointed at the old GTK dashboard (takeover banner /
+  monitor button / editor button in the binary) now point at
+  their M4 homes (dashboard page + dashboardlib launch table),
+  the same treatment M3 gave the Phase 5 chat assertions.
+- Local runs before push: dashboardtest, eventbustest,
+  modeltest, chattest and settingstest pass (chattest/modeltest
+  against the locally built engine bundle + local mocks only,
+  as in M3).
+
+### Named limits / not done
+
+- WebView visuals and the page's JS runtime cannot be verified
+  on this headless build machine: the page is gate-checked
+  statically (palette/rule tokens/no external resources) and
+  every host behaviour behind it is covered by dashboardtest;
+  the in-page rendering/animation itself is NOT verified. The
+  taskbar indicator is likewise GTK-visual-unverified here.
+- Scoped approval is queued, NOT shipped (record above); the
+  overlay honestly offers approve/deny only.
+- Approval events remain a display/verdict wiring only:
+  publisher authentication and ticket tamper-proofing remain
+  the later P0 pass (unchanged from M1/M3).
+
 ## Module ledger
 
 | Module | Commit | Run | Result |
@@ -584,9 +766,8 @@ agentlooptest pass unchanged.
 | P6-M1 event bus + live output + task wake + bridge core | (this commit) | — | pending |
 | P6-M2 model settings complete (WebView + routing wiring + usage ledger) | (this commit) | — | pending |
 | P6-M3 chat WebView + true streaming (SSE openai/passthrough, staged claude) | (this commit) | — | pending |
+| P6-M4 dashboard WebView + taskbar agent state + approval overlay | (this commit) | — | pending |
 
 ## Later modules (not started)
 
-- M2 model settings WebView, M3 chat streaming WebView,
-  M4 dashboard timeline WebView — all on the bridge core above.
 - M5 GTK4 migration, M6 close-out.

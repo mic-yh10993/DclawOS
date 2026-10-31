@@ -1,39 +1,44 @@
 #!/usr/bin/env python3
-"""DclawOS AI dashboard (Phase 2 module 2): the default desktop view.
+"""DclawOS AI dashboard (Phase 2 module 2; Phase 6 module M4).
 
-Shows the AI's live operations as an event stream: commands run, files
-modified, tokens / model statistics, approvals, takeovers, system notes.
+M4 rebuild: the window is now a WebView HOST around the local
+dashboard page (/usr/share/dclawos/dashboard.html), following the
+M2 settings / M3 chat host pattern (WebKit2 4.1, typed bridge
+dispatch, event-bus subscription forwarding). All logic lives in
+dashboardlib.DashboardHost (headless, gate-tested by
+dashboardtest.py):
 
-Phase 6 M1 (push, per the user's 2026-10-31 directive): the dashboard
-SUBSCRIBES to the Unix-socket event bus (eventbus.py, served by the
-agent daemon). The durable events file (/var/lib/dclawos/events.jsonl,
-one JSON object per line: ts, type, summary, session) is read ONCE at
-startup for history; after that, freshness is event-driven only —
-bus events arrive on a subscriber thread and are marshalled into the
-GTK main loop with GLib.idle_add. There is no display timer. The
-takeover banner follows the same path: takeoverlib publishes a bus
-event on request creation/resolution, and the banner re-counts
-pending requests when such an event arrives. Bus-only signals
-(data.display False, e.g. task wakes) never become event rows.
+- The timeline is the pre-M4 event stream with identical
+  semantics: the durable events file is read ONCE at startup for
+  history (inside DashboardHost), after that freshness is the
+  M1 event bus ONLY — bus events arrive on a subscriber thread
+  and are marshalled into the GTK loop with GLib.idle_add; there
+  is no display timer and the file is never re-read. Bus-only
+  signals (data.display False) never become timeline rows, but
+  takeover events still refresh the banner state (now a page
+  element fed by host-pushed counts), exactly as before.
+- Counts (running / waiting / done / failed tasks, token and
+  cost totals) are recomputed BY THE HOST when a relevant bus
+  event arrives and pushed to the page — no page polling, no
+  host timer polling.
+- The approval overlay lives on the page; verdicts are written
+  by the host through chatlib.apply_verdict, the one shared
+  dclawos-approve write path (see dashboardlib).
+- If WebKit2 is unavailable the window degrades to an
+  explanatory label (no second full UI is maintained). The
+  GTK4 shell migration is M5, not this module.
 
-Reuse notes (evaluation cards §2, step 0 retrieval):
-- Dashboard shell itself: self-written. No reference repo has a desktop
-  dashboard: `grep -rni "dashboard" gnome-shell/js/ui/` hits nothing, and
-  openclaw's session views target the gateway web layer, not a desktop
-  shell — retrieval is the proof, see the cards.
-- Event-source rows are adapted, not copied: command receipts follow the
-  openclaw operator-approval-store receipt shape (retention + summary
-  caps); file rows follow the diff-model idea (vscode diffEditorModel);
-  tokens/model rows aggregate omniroute smartRouting outputs
-  (routing_explanation, cost_envelope) into per-session statistics.
-// reuse-check: openclaw gateway session views NOT adopted, reason: they
-  target the gateway web layer; the user forbids web management, so the
-  dashboard is a native GTK3 view over a local event bus.
-// reuse-check: GLib main-loop marshalling follows the repo's existing
-  GTK pattern (chat/settings use GLib.idle_add for cross-thread UI
-  updates); the bus subscriber itself is eventbus.EventSubscriber
-  (stdlib thread), reason: Gio's socket client would still need a
-  line protocol and retry loop that eventbus already owns.
+The binary name and launch entry are unchanged.
+
+// reuse-check: WebView host shell ADOPTED from dclawos-chat
+  (M3) — UserContentManager script handler, hello/command
+  validation via bridgeprotocol, GLib.idle_add marshalling of
+  page-bound JS, focus re-read push, dark-class on hello; the
+  dashboard-specific parts are only the surface name, the page
+  path and the DashboardHost instance.
+// reuse-check: append_event/_share_event_file are KEPT from the
+  pre-M4 dashboard (the startup "dashboard started" event other
+  tooling may rely on), unchanged.
 """
 import grp
 import json
@@ -42,37 +47,33 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, "/usr/local/lib/dclawos")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "lib",
+    "dclawos"))
+
+try:
+    import bridgeprotocol
+    import dashboardlib
+    import settingslib
+except ImportError:
+    bridgeprotocol = None
+    dashboardlib = None
+    settingslib = None
+
+try:
+    import eventbus
+except ImportError:
+    eventbus = None
+
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib  # noqa: E402
 
-# Takeover banner (module 6): best effort — if the takeover store is
-# absent the dashboard still works, it just never shows the banner.
-try:
-    sys.path.insert(0, "/usr/local/lib/dclawos")
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "lib",
-        "dclawos"))
-    import takeoverlib
-    import eventbus
-except ImportError:
-    takeoverlib = None
-    eventbus = None
-
 EVENTS_PATH = os.environ.get("DCLAWOS_EVENTS_PATH",
                              "/var/lib/dclawos/events.jsonl")
-MAX_ROWS = 500
-TYPE_LABELS = {
-    "command": "命令",
-    "output": "输出",
-    "file": "文件",
-    "tokens": "tokens",
-    "model": "模型",
-    "approval": "审批",
-    "takeover": "接管",
-    "system": "系统",
-}
+DASHBOARD_PAGE_PATH = "/usr/share/dclawos/dashboard.html"
 
 
 def log(msg):
@@ -85,8 +86,6 @@ def append_event(event):
         os.makedirs(os.path.dirname(EVENTS_PATH), exist_ok=True)
         with open(EVENTS_PATH, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
-        # Exchange file (module 7): the agent user must be able to
-        # append too, so keep the file group-shared (best effort).
         _share_event_file()
         if eventbus is not None:
             eventbus.publish_event(event)
@@ -107,7 +106,7 @@ def _share_event_file():
         pass
 
 
-class Dashboard(Gtk.Window):
+class DashboardWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-dashboard")
         self.set_default_size(1024, 700)
@@ -122,192 +121,180 @@ class Dashboard(Gtk.Window):
         header.set_show_close_button(True)
         self.set_titlebar(header)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
+        self.host = dashboardlib.DashboardHost() \
+            if dashboardlib is not None else None
+        self.webview = None
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(box)
-
-        header = Gtk.Label(label="AI 看板 — AI 正在进行的操作（实时事件流）")
-        header.set_halign(Gtk.Align.START)
-        box.pack_start(header, False, False, 0)
-
-        # Module 6 takeover banner: hidden unless a takeover request is
-        # pending. The human sees it on the default desktop view and
-        # clicks through to the takeover popup.
-        # Phase 5 module 5 (iron rule 7): the banner lives in a
-        # Gtk.Revealer — it slides in/out with a layout-driven
-        # height animation instead of popping.
-        self.takeover_banner = Gtk.Button(label="")
-        self.takeover_banner.connect("clicked", self.open_takeover)
-        self.takeover_revealer = Gtk.Revealer()
-        self.takeover_revealer.set_transition_type(
-            Gtk.RevealerTransitionType.SLIDE_DOWN)
-        self.takeover_revealer.set_transition_duration(250)
-        self.takeover_revealer.set_reveal_child(False)
-        self.takeover_revealer.add(self.takeover_banner)
-        box.pack_start(self.takeover_revealer, False, False, 0)
-
-        # Module 7 monitor button: the human's watch + stop controls.
-        monitor_btn = Gtk.Button(label="监视 AI（进程与叫停）")
-        monitor_btn.connect("clicked", self.open_monitor)
-        box.pack_start(monitor_btn, False, False, 0)
-
-        # Module 8 editor button: fast native code editing.
-        editor_btn = Gtk.Button(label="编辑器")
-        editor_btn.connect("clicked", self.open_editor)
-        box.pack_start(editor_btn, False, False, 0)
-
-        self.store = Gtk.ListStore(str, str, str, str)
-        tree = Gtk.TreeView(model=self.store)
-        for index, title in enumerate(("时间", "类型", "摘要", "会话")):
-            column = Gtk.TreeViewColumn(
-                title, Gtk.CellRendererText(), text=index)
-            column.set_resizable(True)
-            if index == 2:
-                column.set_expand(True)
-            tree.append_column(column)
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.add(tree)
-        box.pack_start(scrolled, True, True, 0)
-        self.scrolled = scrolled
-
-        self.offset = 0
-        self.placeholder = None
-        self.show_placeholder()
-        # Phase 6 M1: one-time history load, then bus subscription.
-        self.load_initial_events()
-        self.refresh_takeover()
-        self.subscriber = None
-        if eventbus is not None:
-            self.subscriber = eventbus.EventSubscriber(
-                self._on_bus_event_thread)
-            self.subscriber.start()
-
-    def open_takeover(self, _button):
         try:
-            subprocess.Popen(["dclawos-takeover"])
-        except OSError as exc:
-            log(f"takeover popup launch failed: {exc}")
-
-    def open_monitor(self, _button):
+            gi.require_version("WebKit2", "4.1")
+            from gi.repository import WebKit2
+        except (ImportError, ValueError) as exc:
+            label = Gtk.Label(
+                label=f"WebKitGTK 4.1 不可用（{exc}），看板 WebView "
+                      "无法加载。事件流仍在写入事件文件，监视与设置"
+                      "不受影响；本窗口不维护第二套界面。")
+            label.set_line_wrap(True)
+            label.set_halign(Gtk.Align.START)
+            box.pack_start(label, True, True, 8)
+            return
+        manager = WebKit2.UserContentManager()
+        manager.register_script_message_handler("dclawos")
+        manager.connect("script-message-received::dclawos",
+                        self._on_bridge_message)
         try:
-            subprocess.Popen(["dclawos-monitor"])
-        except OSError as exc:
-            log(f"monitor launch failed: {exc}")
-
-    def open_editor(self, _button):
-        try:
-            subprocess.Popen(["dclawos-editor"])
-        except OSError as exc:
-            log(f"editor launch failed: {exc}")
-
-    def refresh_takeover(self):
-        """Re-count pending takeovers once. Called at startup and
-        on takeover bus events — never on a timer."""
-        if takeoverlib is None:
-            return False
-        try:
-            pending = takeoverlib.count_pending()
-        except Exception as exc:
-            log(f"takeover count failed: {exc}")
-            return False
-        if pending > 0:
-            self.takeover_banner.set_label(
-                f"⚠ AI 需要你帮忙：{pending} 个接管请求待处理（点击处理）")
-            self.takeover_revealer.set_reveal_child(True)
+            webview = WebKit2.WebView.new_with_user_content_manager(
+                manager)
+        except Exception:  # noqa: BLE001 - older binding shape
+            webview = WebKit2.WebView()
+        self.webview = webview
+        if os.path.exists(DASHBOARD_PAGE_PATH):
+            webview.load_uri("file://" + DASHBOARD_PAGE_PATH)
         else:
-            self.takeover_revealer.set_reveal_child(False)
+            webview.load_html(
+                "<html><body><p>看板页面资源缺失："
+                + DASHBOARD_PAGE_PATH + "</p></body></html>",
+                "file:///")
+        box.pack_start(webview, True, True, 0)
+        # Push: subscribe to the M1 event bus; dashboardlib folds
+        # each event into host state and decides what the page
+        # receives. Subscription lifecycle only — there is
+        # deliberately no display polling timer here.
+        self._subscriber = None
+        if eventbus is not None:
+            try:
+                self._subscriber = eventbus.EventSubscriber(
+                    self._on_bus_event_thread).start()
+            except Exception as exc:  # noqa: BLE001 - push is additive
+                log(f"event subscription unavailable: {exc}")
+        self.connect("focus-in-event", self._on_focus_in)
+
+    # ------------------------------------------------------------ bridge
+
+    def _on_focus_in(self, _window, _event):
+        # Re-read shared state on focus (M2/M3 host pattern): the
+        # page re-requests its state snapshot on this push.
+        self._push_event("settings", {"reason": "focus"})
         return False
 
     def _on_bus_event_thread(self, event):
         # Subscriber thread: marshal into the GTK main loop.
-        GLib.idle_add(self.on_bus_event, event)
+        GLib.idle_add(self._on_bus_event_main, event)
 
-    def on_bus_event(self, event):
-        if not isinstance(event, dict):
+    def _on_bus_event_main(self, event):
+        if self.host is None:
             return False
-        if event.get("type") == "takeover":
-            self.refresh_takeover()
-        data = event.get("data")
-        if isinstance(data, dict) and data.get("display") is False:
-            return False  # bus-only signal, not an event row
-        self.add_event_row(event)
+        try:
+            forwarded = self.host.handle_bus_event(event)
+        except Exception:  # noqa: BLE001 - forwarding is additive
+            return False
+        for item in forwarded:
+            self._push_event(item.get("type", "system"),
+                             item.get("data") or {})
         return False
 
-    def show_placeholder(self):
-        if self.placeholder is None:
-            self.placeholder = self.store.append(
-                ("--", "系统", "暂无事件，等待 agent 写入事件流", ""))
-        return True
-
-    def clear_placeholder(self):
-        if self.placeholder is not None:
-            try:
-                self.store.remove(self.placeholder)
-            except Exception:
-                pass
-            self.placeholder = None
-
-    def load_initial_events(self):
-        """One-time history load at startup. Everything after this
-        arrives over the bus; the file is never re-read."""
-        try:
-            with open(EVENTS_PATH, "r", encoding="utf-8") as handle:
-                chunk = handle.read()
-                self.offset = handle.tell()
-        except OSError:
+    def _push_event(self, event_type, data):
+        if self.webview is None or bridgeprotocol is None:
             return
-        for line in chunk.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        try:
+            message = bridgeprotocol.make_event(event_type, data)
+        except Exception:  # noqa: BLE001
+            return
+        self._send_to_page(message)
+
+    def _send_to_page(self, message):
+        webview = self.webview
+        if webview is None:
+            return
+        script = "window.__dclawosReceive && window.__dclawosReceive(" \
+            + json.dumps(message, ensure_ascii=False) + ");"
+
+        def _do():
             try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            self.add_event_row(event, scroll=False)
+                if hasattr(webview, "evaluate_javascript"):
+                    webview.evaluate_javascript(
+                        script, -1, None, None, None, None)
+                else:
+                    webview.run_javascript(script, None, None, None)
+            except Exception:  # noqa: BLE001 - page may be reloading
+                pass
+            return False
 
-    def add_event_row(self, event, scroll=True):
-        self.clear_placeholder()
-        ts = event.get("ts", 0)
-        try:
-            when = time.strftime("%H:%M:%S", time.localtime(int(ts)))
-        except (ValueError, TypeError):
-            when = "--"
-        kind = TYPE_LABELS.get(str(event.get("type", "")),
-                               str(event.get("type", "")))
-        self.store.append((when, kind,
-                           str(event.get("summary", "")),
-                           str(event.get("session", ""))))
-        # Cap the view (oldest rows drop) so a long session cannot
-        # grow the UI unboundedly.
-        while len(self.store) > MAX_ROWS:
-            first = self.store.get_iter_first()
-            if first is None:
-                break
-            self.store.remove(first)
-        if scroll and len(self.store) > 0:
-            # Scroll to the newest row (dashboard semantics: live tail).
-            path = self.store.get_path(
-                self.store.iter_nth_child(None, len(self.store) - 1))
-            GLib.idle_add(self.scroll_to, path)
+        GLib.idle_add(_do)
 
-    def scroll_to(self, path):
+    def _on_bridge_message(self, _manager, js_result):
+        if bridgeprotocol is None or self.host is None:
+            return
         try:
-            tree = self.scrolled.get_child()
-            tree.scroll_to_cell(path, None, False, 0.0, 0.0)
-        except Exception:
-            pass
-        return False
+            try:
+                value = js_result.get_js_value()
+                text = value.to_string()
+            except Exception:  # noqa: BLE001 - older binding shape
+                text = js_result.to_string()
+            message = json.loads(text)
+        except Exception:  # noqa: BLE001 - untrusted input
+            return
+        if isinstance(message, dict) and message.get("kind") == "hello":
+            try:
+                bridgeprotocol.validate_hello(message)
+            except bridgeprotocol.BridgeError as exc:
+                self._send_to_page(exc.to_error(None))
+                return
+            self._send_to_page(
+                bridgeprotocol.make_hello_ack("dashboard"))
+            try:
+                if settingslib is not None and \
+                        settingslib.get_setting("ui-dark"):
+                    script = "document.body.classList.add('dark');"
+
+                    def _do_dark():
+                        try:
+                            if hasattr(self.webview,
+                                       "evaluate_javascript"):
+                                self.webview.evaluate_javascript(
+                                    script, -1, None, None, None,
+                                    None)
+                            else:
+                                self.webview.run_javascript(
+                                    script, None, None, None)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return False
+
+                    GLib.idle_add(_do_dark)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            command = bridgeprotocol.validate_command(
+                message, "dashboard")
+        except bridgeprotocol.BridgeError as exc:
+            request_id = message.get("id") if isinstance(
+                message, dict) else None
+            self._send_to_page(exc.to_error(request_id))
+            return
+        verb = command["command"]
+        params = command["params"]
+        request_id = command["id"]
+        try:
+            result = self.host.dispatch(verb, params)
+        except Exception as exc:  # noqa: BLE001 - typed error reply
+            self._send_to_page(bridgeprotocol.make_error(
+                request_id, "handler_error", str(exc)[:500]))
+            return
+        self._send_to_page(bridgeprotocol.make_reply(
+            request_id, result))
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print("usage: dclawos-dashboard (reads /var/lib/dclawos/events.jsonl)")
         return 0
-    log("dclawos-dashboard started (Phase 2 module 2: event stream)")
+    log("dclawos-dashboard started (Phase 6 M4: WebView dashboard)")
     append_event({"ts": int(time.time()), "type": "system",
                   "summary": "AI 看板已启动，等待 agent 事件", "session": ""})
-    win = Dashboard()
+    win = DashboardWindow()
     win.connect("destroy", Gtk.main_quit)
     win.show_all()
     win.maximize()

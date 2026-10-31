@@ -227,6 +227,74 @@ def project_history(session_id):
     return out
 
 
+def apply_verdict(ticket_id, verdict):
+    """The ONE verdict write shared by every approval surface
+    (extracted in Phase 6 M4 from ChatHost._verdict so the chat
+    host and the dashboard host cannot drift): the
+    dclawos-approve write path, field-for-field — load ticket,
+    require pending, set status / approved_by="human-gui" /
+    approved_at, save via ticketlib. Nothing else grants or
+    executes anything — the broker still binds execution to the
+    ticket's operation + params hash."""
+    if verdict not in ("approved", "denied"):
+        raise ValueError(f"无效裁决：{verdict!r}")
+    if not isinstance(ticket_id, str) or \
+            not ticketlib.TICKET_ID_RE.match(ticket_id):
+        raise ValueError("票据 id 无效")
+    try:
+        ticket = ticketlib.load_ticket(ticket_id)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"读取票据失败：{exc}")
+    if ticket.get("status") != "pending":
+        raise ValueError("该票据已不在待审批状态")
+    ticket["status"] = verdict
+    ticket["approved_by"] = "human-gui"
+    ticket["approved_at"] = int(time.time())
+    ticketlib.save_ticket(ticket)
+    return {"ticket_id": ticket_id, "status": verdict}
+
+
+def approval_card_from_event(event):
+    """Build an approval card dict from a bus approval REQUEST
+    event (no verdict), or None when the event carries no valid
+    ticket id. Params arrive already redacted by agentlib
+    (bridgeprotocol.redact_params before publishing); the card
+    view redacts again before serialising. Shared by the chat
+    host (M3) and the dashboard host (M4)."""
+    data = event.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+    ticket_id = data.get("ticket_id")
+    if not isinstance(ticket_id, str) or \
+            not ticketlib.TICKET_ID_RE.match(ticket_id):
+        return None
+    return {
+        "ticket_id": ticket_id,
+        "tool": data.get("tool", ""),
+        "tier": data.get("tier"),
+        "summary": data.get("summary") or event.get("summary", ""),
+        "params": data.get("params") or {},
+        "status": "pending",
+    }
+
+
+def approval_card_view(card):
+    # Params cross to a page ONLY through redact_params
+    # (secret-shaped values replaced by "<redacted>", structure
+    # kept); the bridge's make_reply additionally strips
+    # secret-shaped keys from the serialised reply, so a secret
+    # value cannot reach the page through either layer.
+    return {
+        "ticket_id": card.get("ticket_id"),
+        "tool": card.get("tool"),
+        "tier": card.get("tier"),
+        "summary": card.get("summary"),
+        "params": bridgeprotocol.redact_params(
+            card.get("params") or {}),
+        "status": card.get("status"),
+    }
+
+
 def list_pending_tickets():
     """Pending, unexpired tickets (dclawos-approve.list_pending)."""
     out = []
@@ -318,20 +386,9 @@ class ChatHost:
         }
 
     def _card_view(self, card):
-        # Params cross to the page ONLY through redact_params
-        # (secret-shaped values replaced by "<redacted>", structure
-        # kept); the bridge's make_reply additionally strips
-        # secret-shaped keys from the serialised reply, so a secret
-        # value cannot reach the page through either layer.
-        return {
-            "ticket_id": card.get("ticket_id"),
-            "tool": card.get("tool"),
-            "tier": card.get("tier"),
-            "summary": card.get("summary"),
-            "params": bridgeprotocol.redact_params(
-                card.get("params") or {}),
-            "status": card.get("status"),
-        }
+        # Shared implementation: chatlib.approval_card_view (M4
+        # extraction; identical redaction semantics).
+        return approval_card_view(card)
 
     # ------------------------------------------------------------ tasks
 
@@ -465,28 +522,14 @@ class ChatHost:
                 "title": str(title)}
 
     def _verdict(self, ticket_id, verdict):
-        """The dclawos-approve verdict write, field-for-field:
-        load ticket, require pending, set status / approved_by /
-        approved_at, save via ticketlib. Nothing else grants or
-        executes anything — the broker still binds execution to
-        the ticket's operation + params hash."""
-        if not isinstance(ticket_id, str) or \
-                not ticketlib.TICKET_ID_RE.match(ticket_id):
-            raise ValueError("票据 id 无效")
-        try:
-            ticket = ticketlib.load_ticket(ticket_id)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"读取票据失败：{exc}")
-        if ticket.get("status") != "pending":
-            raise ValueError("该票据已不在待审批状态")
-        ticket["status"] = verdict
-        ticket["approved_by"] = "human-gui"
-        ticket["approved_at"] = int(time.time())
-        ticketlib.save_ticket(ticket)
+        """Delegates to chatlib.apply_verdict — the ONE shared
+        verdict write (extracted in M4, field-for-field identical
+        to the pre-M4 method and to dclawos-approve)."""
+        result = apply_verdict(ticket_id, verdict)
         card = self.approvals.get(ticket_id)
         if card is not None:
             card["status"] = verdict
-        return {"ticket_id": ticket_id, "status": verdict}
+        return result
 
     # ------------------------------------------------------------ events
 
@@ -506,14 +549,9 @@ class ChatHost:
             return {"type": "approval",
                     "data": {"ticket_id": ticket_id,
                              "status": data["verdict"]}}
-        card = {
-            "ticket_id": ticket_id,
-            "tool": data.get("tool", ""),
-            "tier": data.get("tier"),
-            "summary": data.get("summary") or event.get("summary", ""),
-            "params": data.get("params") or {},
-            "status": "pending",
-        }
+        card = approval_card_from_event(event)
+        if card is None:
+            return None
         self.approvals[ticket_id] = card
         return {"type": "approval", "data": self._card_view(card)}
 

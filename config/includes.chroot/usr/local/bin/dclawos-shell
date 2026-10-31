@@ -34,6 +34,23 @@ Reuse notes (evaluation cards §1, step 0 retrieval):
   bottom 48px via _NET_WM_STRUT_PARTIAL (visually fullscreen except the
   taskbar); windowed mode unmaximizes instead. A future Wayland + mutter
   migration can use true fullscreen + layer-shell to satisfy both at once.
+
+Phase 6 M4 (agent status indicator): the taskbar gains ONE element —
+an agent-state indicator (dot + label: 空闲 / 思考中 / 等待批准 /
+需要你) between the slots and the clock — plus an event-bus
+subscription. The four-state reduction is dashboardlib's pure
+reducer (initial_shell_state seeds the pending counts ONCE from
+the ticket/takeover/task stores; afterwards only bus events move
+it — no store is re-read on a timer). Slot geometry, the 48px
+height and the strut code are untouched. The indicator's breathing
+animation uses a GLib timer that ONLY toggles the widget opacity
+(animation frames); it reads no data and no state files — all
+state changes arrive via the bus subscription.
+// reuse-check: reducer + initial state ADOPTED from dashboardlib
+  (M4), shared with the dashboard host so taskbar and dashboard
+  can never disagree about the agent state; bus subscription is
+  eventbus.EventSubscriber with GLib.idle_add marshalling, the
+  repo's existing GTK pattern (dashboard/monitor/chat).
 """
 import os
 import shutil
@@ -44,6 +61,13 @@ import time
 sys.path.insert(0, "/usr/local/lib/dclawos")
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
+
+try:
+    import dashboardlib
+    import eventbus
+except Exception:  # noqa: BLE001 - indicator is additive
+    dashboardlib = None
+    eventbus = None
 
 import gi
 
@@ -71,6 +95,14 @@ SLOTS = [
 ]
 TASKBAR_HEIGHT = 48
 VERSION_LABEL = "DclawOS 2.0"
+# Phase 6 M4: agent-state dot colours (UI-RULES palette family;
+# no pure black). Keyed by dashboardlib.shell_status keys.
+AGENT_STATE_COLORS = {
+    "idle": "#6b6b68",
+    "thinking": "#3d5a80",
+    "approval": "#9a6a12",
+    "attention": "#b3402e",
+}
 
 
 def log(msg):
@@ -169,6 +201,35 @@ class Taskbar(Gtk.Window):
         spacer = Gtk.Box()
         bar.pack_start(spacer, True, True, 0)
 
+        # Phase 6 M4: agent-state indicator (dot + label). Clicking
+        # it opens the dashboard via the existing slot path. Its
+        # state comes only from dashboardlib's reducer over bus
+        # events (seeded once below); the breathing timer further
+        # down animates opacity frames only and reads no data.
+        self.agent_state = None
+        self._agent_pulse_on = True
+        self.agent_button = Gtk.Button()
+        self.agent_label = Gtk.Label(label="")
+        self.agent_button.add(self.agent_label)
+        self.agent_button.connect("clicked", self.on_agent_clicked)
+        bar.pack_end(self.agent_button, False, False, 0)
+        if dashboardlib is not None:
+            try:
+                self.agent_state = dashboardlib.initial_shell_state()
+            except Exception:  # noqa: BLE001 - seed is best-effort
+                self.agent_state = dashboardlib.new_shell_state()
+            self._render_agent_state()
+            GLib.timeout_add(700, self._pulse_agent)
+            self._agent_subscriber = None
+            if eventbus is not None:
+                try:
+                    self._agent_subscriber = eventbus.EventSubscriber(
+                        self._on_agent_bus_event_thread).start()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"agent state subscription unavailable: {exc}")
+        else:
+            self.agent_button.hide()
+
         self.battery = Gtk.Label(label="")
         bar.pack_end(self.battery, False, False, 0)
         self.clock = Gtk.Label(label="")
@@ -235,6 +296,53 @@ class Taskbar(Gtk.Window):
                 Gdk.PropMode.REPLACE, [0, 0, 0, bottom])
         except Exception as exc:
             log(f"strut setup failed (degraded): {exc}")
+
+    # ------------------------------------------------ Phase 6 M4
+
+    def on_agent_clicked(self, _button):
+        """Open the dashboard through the existing slot machinery
+        (same activation/launch path as clicking AI 看板)."""
+        self.on_slot_clicked(_button, "AI 看板")
+
+    def _render_agent_state(self):
+        if dashboardlib is None or self.agent_state is None:
+            return False
+        status = dashboardlib.shell_status(self.agent_state)
+        color = AGENT_STATE_COLORS.get(status["key"], "#6b6b68")
+        self.agent_label.set_markup(
+            f'<span foreground="{color}">●</span> {status["label"]}')
+        if status["key"] not in ("approval", "attention"):
+            self.agent_button.set_opacity(1.0)
+        return False
+
+    def _pulse_agent(self):
+        """Breathing animation for the waiting states. This timer
+        drives ANIMATION FRAMES ONLY (widget opacity); it reads no
+        files, no stores and no state — freshness is the bus."""
+        if dashboardlib is not None and self.agent_state is not None:
+            status = dashboardlib.shell_status(self.agent_state)
+            if status["key"] in ("approval", "attention"):
+                self._agent_pulse_on = not self._agent_pulse_on
+                self.agent_button.set_opacity(
+                    1.0 if self._agent_pulse_on else 0.45)
+            elif self.agent_button.get_opacity() != 1.0:
+                self.agent_button.set_opacity(1.0)
+        return True
+
+    def _on_agent_bus_event_thread(self, event):
+        # Subscriber thread: marshal into the GTK main loop.
+        GLib.idle_add(self._apply_agent_event, event)
+
+    def _apply_agent_event(self, event):
+        if dashboardlib is None or self.agent_state is None:
+            return False
+        try:
+            self.agent_state = dashboardlib.reduce_shell_state(
+                self.agent_state, event)
+        except Exception:  # noqa: BLE001 - indicator is additive
+            return False
+        self._render_agent_state()
+        return False
 
     def tick_clock(self):
         self.clock.set_text(time.strftime("%H:%M:%S"))

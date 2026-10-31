@@ -98,12 +98,21 @@ SURFACE_COMMANDS = {
         "chat.copy": {"secret_params": False},
         "chat.launch": {"secret_params": False},
     },
-    # M4 (dashboard WebView): read a snapshot, open the takeover
-    # popup on the host side, acknowledge an event row.
+    # M4 (dashboard WebView): the M1 placeholder verbs
+    # (dashboard.snapshot / takeover.open / event.ack) were never
+    # implemented by any host; M4 replaces them with the real
+    # surface — a full state snapshot (history + counts + usage +
+    # pending approvals/takeovers), approval verdicts (ticket_id
+    # only; the host writes the verdict through the ONE shared
+    # chatlib.apply_verdict path, exactly as dclawos-approve and
+    # the M3 chat host do), and launching the sibling apps
+    # (takeover popup included). None is secret-bearing: approval
+    # params shown to the page are redacted host-side first.
     "dashboard": {
-        "dashboard.snapshot": {"secret_params": False},
-        "takeover.open": {"secret_params": False},
-        "event.ack": {"secret_params": False},
+        "dashboard.state": {"secret_params": False},
+        "dashboard.approve": {"secret_params": False},
+        "dashboard.deny": {"secret_params": False},
+        "dashboard.launch": {"secret_params": False},
     },
 }
 

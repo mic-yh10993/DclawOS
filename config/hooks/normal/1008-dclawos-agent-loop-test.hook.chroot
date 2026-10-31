@@ -85,3 +85,15 @@ python3 /usr/local/lib/dclawos/modeltest.py
     exit 1
 }
 python3 /usr/local/lib/dclawos/chattest.py
+
+# Phase 6 module M4: dashboard WebView + taskbar state gate.
+# dashboardlib snapshot construction (counts, null-cost split,
+# snapshot/live dedupe by event id), the shell four-state reducer
+# transitions, the approval overlay payload redaction + the
+# shared verdict write fields, and pending-count seeding with
+# event-only increments — all against temp-dir fixtures.
+[ -f /usr/local/lib/dclawos/dashboardtest.py ] || {
+    echo "dclawos-dashboardtest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/dashboardtest.py

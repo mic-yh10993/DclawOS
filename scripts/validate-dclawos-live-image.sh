@@ -476,10 +476,20 @@ grep -q 'FORBIDDEN_RESULT_KEYS' "$WORK/takeoverlib-extract/usr/local/lib/dclawos
     exit 1
 }
 # Dashboard must carry the takeover banner (module 6 launch path).
+# Phase 6 M4 supersedes the location: the banner is now an element
+# of the dashboard WebView page, fed by dashboardlib's pending
+# takeover views (the pre-M4 GTK banner widget is gone with the
+# GTK timeline); the launch path is dashboardlib's launch table.
 unsquashfs -d "$WORK/dash-takeover-extract" "$FS" usr/local/bin/dclawos-dashboard >/dev/null 2>&1
 python3 -m py_compile "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard"
-grep -q 'takeover_banner' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
-    echo "dashboard lacks the takeover banner" >&2
+unsquashfs -d "$WORK/dashlib-extract" "$FS" usr/local/lib/dclawos/dashboardlib.py usr/share/dclawos/dashboard.html >/dev/null 2>&1
+python3 -m py_compile "$WORK/dashlib-extract/usr/local/lib/dclawos/dashboardlib.py"
+grep -q 'takeoverbar' "$WORK/dashlib-extract/usr/share/dclawos/dashboard.html" || {
+    echo "dashboard page lacks the takeover banner" >&2
+    exit 1
+}
+grep -q 'pending_takeover_views' "$WORK/dashlib-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboardlib lacks the pending takeover views" >&2
     exit 1
 }
 # Phase 2 module 7: separation + monitoring. The tools must be valid;
@@ -493,8 +503,8 @@ done
 unsquashfs -d "$WORK/agent-run-extract" "$FS" usr/local/bin/dclawos-agent-run >/dev/null 2>&1
 test -x "$WORK/agent-run-extract/usr/local/bin/dclawos-agent-run"
 sh -n "$WORK/agent-run-extract/usr/local/bin/dclawos-agent-run"
-grep -q 'dclawos-monitor' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
-    echo "dashboard lacks the monitor button" >&2
+grep -q 'dclawos-monitor' "$WORK/dashlib-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboard lacks the monitor launch target (M4: dashboardlib)" >&2
     exit 1
 }
 unsquashfs -d "$WORK/privbroker-extract" "$FS" usr/local/bin/dclawos-privileged >/dev/null 2>&1
@@ -568,8 +578,8 @@ if grep -qE 'require_version\("?(Vte|WebKit)|from gi.repository import.*(Vte|Web
 fi
 unsquashfs -d "$WORK/modifiedfiles-extract" "$FS" usr/local/lib/dclawos/modifiedfiles.py >/dev/null 2>&1
 python3 -m py_compile "$WORK/modifiedfiles-extract/usr/local/lib/dclawos/modifiedfiles.py"
-grep -q 'dclawos-editor' "$WORK/dash-takeover-extract/usr/local/bin/dclawos-dashboard" || {
-    echo "dashboard lacks the editor button" >&2
+grep -q 'dclawos-editor' "$WORK/dashlib-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboard lacks the editor launch target (M4: dashboardlib)" >&2
     exit 1
 }
 unsquashfs -d "$WORK/release-extract" "$FS" usr/share/dclawos/release >/dev/null 2>&1
@@ -985,6 +995,105 @@ assert "chat.model.set" in stripped, \
 PYEOF
 grep -q 'chattest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
     echo "hook 1008 lacks the chattest call" >&2
+    exit 1
+}
+
+# Phase 6 module M4: dashboard WebView + approval overlay +
+# taskbar agent state. The dashboard lib + gate test + WebView
+# page must ship and compile; the page must execute the iron
+# rules in native web form (palette, no pure black, tabular-nums,
+# text-wrap:pretty, Grid fold, focus double ring, inline-icon
+# alignment, 2.5s feedback — all on comment-stripped text) and
+# call the M4 bridge verbs; the dashboard host must subscribe to
+# the event bus with NO display polling timer in stripped code;
+# the taskbar must keep its frozen geometry (TASKBAR_HEIGHT = 48
+# and the _NET_WM_STRUT_PARTIAL reservation) while carrying the
+# dashboardlib reducer wiring; the bridge registry must carry
+# the M4 dashboard verbs; hook 1008 must run dashboardtest.
+# Behavior is gated by hook 1008 (dashboardtest).
+for lib in dashboardlib dashboardtest; do
+    unsquashfs -d "$WORK/${lib}-p6m4-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p6m4-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p6m4-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'class DashboardHost' "$WORK/dashboardlib-p6m4-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboardlib lacks the DashboardHost" >&2
+    exit 1
+}
+grep -q 'def reduce_shell_state' "$WORK/dashboardlib-p6m4-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboardlib lacks the shell state reducer" >&2
+    exit 1
+}
+grep -q 'def merge_events' "$WORK/dashboardlib-p6m4-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboardlib lacks the snapshot/live merge" >&2
+    exit 1
+}
+grep -q 'apply_verdict' "$WORK/dashboardlib-p6m4-extract/usr/local/lib/dclawos/dashboardlib.py" || {
+    echo "dashboardlib does not use the shared verdict write" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/dashpage-p6m4-extract" "$FS" usr/share/dclawos/dashboard.html >/dev/null 2>&1
+test -s "$WORK/dashpage-p6m4-extract/usr/share/dclawos/dashboard.html"
+python3 - "$WORK/dashpage-p6m4-extract/usr/share/dclawos/dashboard.html" <<'PYEOF'
+import re, sys
+page = open(sys.argv[1], encoding="utf-8").read()
+stripped = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.S)
+assert "#000" not in stripped, "dashboard page uses pure black"
+for token in ("#f5f5f3", "#fcfcfb", "#0b0b0a", "#151515",
+              "#1a1a19", "#20201e"):
+    assert token in stripped, f"dashboard page lost palette token {token}"
+assert "tabular-nums" in stripped, "dashboard page lacks tabular-nums"
+assert "text-wrap:pretty" in stripped.replace(" ", ""), \
+    "dashboard page lacks text-wrap:pretty"
+assert "grid-template-rows:0fr" in stripped.replace(" ", ""), \
+    "dashboard page lacks the Grid 0fr->1fr fold"
+assert "box-shadow:inset0001px" in stripped.replace(" ", ""), \
+    "dashboard page lacks the focus double ring"
+assert "vertical-align:-0.125em" in stripped.replace(" ", ""), \
+    "dashboard page lacks the inline-icon alignment"
+assert "2500" in stripped, "dashboard page lacks the 2.5s feedback timer"
+assert not re.search(r'(?:src|href)\s*=\s*"https?://', stripped), \
+    "dashboard page references an external resource"
+assert "__dclawosReceive" in stripped, \
+    "dashboard page lacks the bridge receiver"
+assert "dashboard.state" in stripped, \
+    "dashboard page does not load state via the bridge"
+assert "dashboard.approve" in stripped, \
+    "dashboard page does not decide approvals via the bridge"
+assert "dashboard.launch" in stripped, \
+    "dashboard page does not launch apps via the bridge"
+PYEOF
+grep -q 'WebKit2' "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard host does not load WebKit2 (M4 WebView missing)" >&2
+    exit 1
+}
+if strip_py "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" | grep -q 'timeout_add'; then
+    echo "dashboard host still has a display polling timer" >&2
+    exit 1
+fi
+grep -q 'dashboard.approve' "$WORK/bridgeprotocol-p6m1-extract/usr/local/lib/dclawos/bridgeprotocol.py" || {
+    echo "bridgeprotocol lacks the M4 dashboard verbs" >&2
+    exit 1
+}
+grep -q 'TASKBAR_HEIGHT = 48' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "taskbar height constant changed (M4 must not move geometry)" >&2
+    exit 1
+}
+grep -q '_NET_WM_STRUT_PARTIAL' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "taskbar lost the strut reservation" >&2
+    exit 1
+}
+grep -q 'reduce_shell_state' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "taskbar does not reduce bus events via dashboardlib (M4)" >&2
+    exit 1
+}
+grep -q 'initial_shell_state' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "taskbar does not seed its agent state from the stores (M4)" >&2
+    exit 1
+}
+grep -q 'dashboardtest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
+    echo "hook 1008 lacks the dashboardtest call" >&2
     exit 1
 }
 
