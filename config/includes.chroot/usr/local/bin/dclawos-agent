@@ -511,10 +511,12 @@ def execute_step(task, step, step_index=None):
             broker_params = {"key": params.get("key"),
                              "value": params.get("value")}
             verdict, ticket_id = agentlib.request_approval(
-                "set-setting", broker_params, summary)
+                "set-setting", broker_params, summary,
+                task_id=task.get("id"), session=task.get("session", ""))
         else:
             verdict, ticket_id = agentlib.request_approval(
-                tool, params, summary)
+                tool, params, summary,
+                task_id=task.get("id"), session=task.get("session", ""))
         if verdict != "approved":
             raise ValueError(f"approval {verdict} for {tool} ({reason})")
     if tool == "shell":
@@ -614,6 +616,9 @@ def _cron(params):
 
 
 LLM_MAX_TURNS = 12
+# Phase 6 M3 delta coalescing for the event bus (see run_llm_task).
+STREAM_COALESCE_CHARS = 48
+STREAM_COALESCE_SECONDS = 0.25
 LLM_TOOL_RESULT_CAP = 8000
 
 SYSTEM_PROMPT = (
@@ -723,19 +728,88 @@ def run_llm_task(task):
             _maybe_compact(conv_session)
             messages = convlib.project_messages(conv_session,
                                                 SYSTEM_PROMPT)
-            result = llmlib.call(
+            # Phase 6 M3: streaming call. Deltas are published as
+            # "llm" bus events (agentlib.log_event writes the
+            # durable log first, then the bus) carrying task_id,
+            # the conversation session and the turn number.
+            # Coalescing: fragments accumulate until
+            # STREAM_COALESCE_CHARS (48) chars are buffered OR
+            # STREAM_COALESCE_SECONDS (0.25 s) elapsed since the
+            # last publish, whichever first; any remainder is
+            # flushed when the call returns. This keeps a chatty
+            # token stream from flooding the bus while staying
+            # well under a second of added latency.
+            _stream_state = {"buf": "", "last": 0.0, "seq": 0}
+
+            def _publish_delta(force=False):
+                buf = _stream_state["buf"]
+                if not buf:
+                    return
+                if not force and len(buf) < STREAM_COALESCE_CHARS \
+                        and (time.time() - _stream_state["last"]) \
+                        < STREAM_COALESCE_SECONDS:
+                    return
+                _stream_state["buf"] = ""
+                _stream_state["last"] = time.time()
+                _stream_state["seq"] += 1
+                agentlib.log_event(
+                    "llm", f"llm delta turn {turn} "
+                    f"seq {_stream_state['seq']}",
+                    session=task["session"], task_id=task.get("id"),
+                    data={"delta": buf, "stream_mode": "sse",
+                          "conv_session": conv_session, "turn": turn,
+                          "seq": _stream_state["seq"],
+                          "task_id": task.get("id")})
+
+            def _on_delta(delta):
+                text = delta.get("text") or ""
+                if not text:
+                    return
+                if delta.get("stream_mode") == "staged":
+                    # Staged (non-SSE) path: the fragment carries
+                    # its honest mode; publish it as-is, in one go.
+                    _stream_state["buf"] += text
+                    agentlib.log_event(
+                        "llm", f"llm staged turn {turn}",
+                        session=task["session"], task_id=task.get("id"),
+                        data={"delta": _stream_state["buf"],
+                              "stream_mode": "staged",
+                              "conv_session": conv_session,
+                              "turn": turn,
+                              "seq": _stream_state["seq"] + 1,
+                              "task_id": task.get("id")})
+                    _stream_state["buf"] = ""
+                    _stream_state["seq"] += 1
+                    return
+                _stream_state["buf"] += text
+                _publish_delta()
+
+            result = llmlib.call_stream(
                 messages, tools=toolslib.tools_for_model(),
                 provider=task.get("provider"),
                 model=task.get("model"),
                 task_id=task.get("id"),
-                session=task.get("session"))
+                session=task.get("session"), on_delta=_on_delta)
+            _publish_delta(force=True)
             response = result.get("response")
             if not response:
                 task["status"] = "failed"
-                task["error"] = (
-                    "all provider attempts failed: " +
-                    json.dumps(result.get("attempts", []),
-                               ensure_ascii=False)[:400])
+                if result.get("partial"):
+                    # Phase 6 M3: the stream already showed partial
+                    # content; close honestly as a partial failure,
+                    # never as a clean attempt failure.
+                    task["error"] = (
+                        "stream interrupted after partial content "
+                        "(partial): " + str(result.get("error") or "")
+                        )[:400]
+                    task["result"] = {"partial": True,
+                                      "stream_mode":
+                                          result.get("stream_mode")}
+                else:
+                    task["error"] = (
+                        "all provider attempts failed: " +
+                        json.dumps(result.get("attempts", []),
+                                   ensure_ascii=False)[:400])
                 agentlib.log_event(
                     "system", "llm call failed on every target",
                     session=task["session"])
@@ -767,6 +841,7 @@ def run_llm_task(task):
                     "model": result.get("model"),
                     "cost_usd": total_cost if cost_known else None,
                     "turns": turn + 1,
+                    "stream_mode": result.get("stream_mode"),
                 }
                 agentlib.log_event(
                     "system", f"llm task done in {turn + 1} turns",

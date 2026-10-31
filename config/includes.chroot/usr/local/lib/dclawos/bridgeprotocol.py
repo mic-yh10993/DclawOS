@@ -76,11 +76,27 @@ SURFACE_COMMANDS = {
         "model.test": {"secret_params": False},
         "model.usage": {"secret_params": False},
     },
-    # M3 (chat WebView): send a message / load history. Replies are
-    # delivered as events, not as command replies.
+    # M3 (chat WebView): full chat surface (docs/BRIDGE-PROTOCOL.md
+    # M3 table). Replies arrive as pushed events; commands cover
+    # session management, the unified send/assign entry points,
+    # the model switcher, inline approval verdicts (ticket_id
+    # only — the host writes the verdict onto the ticket file
+    # exactly as dclawos-approve does), stop, copy and launching
+    # the sibling apps. None is secret-bearing: approval params
+    # shown to the page are redacted host-side before they cross.
     "chat": {
+        "chat.state": {"secret_params": False},
         "chat.send": {"secret_params": False},
         "chat.history": {"secret_params": False},
+        "chat.assign": {"secret_params": False},
+        "chat.switch": {"secret_params": False},
+        "chat.new": {"secret_params": False},
+        "chat.model.set": {"secret_params": False},
+        "chat.approve": {"secret_params": False},
+        "chat.deny": {"secret_params": False},
+        "chat.stop": {"secret_params": False},
+        "chat.copy": {"secret_params": False},
+        "chat.launch": {"secret_params": False},
     },
     # M4 (dashboard WebView): read a snapshot, open the takeover
     # popup on the host side, acknowledge an event row.

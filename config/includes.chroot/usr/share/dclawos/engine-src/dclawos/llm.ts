@@ -39,7 +39,14 @@
  * closed with an explicit error instead of a guessed request.
  */
 
-import { dispatch, type DispatchTarget } from "./dispatch";
+import {
+  dispatch,
+  classifyFailure,
+  expandTargets,
+  scoreTargets,
+  setupDispatch,
+  type DispatchTarget,
+} from "./dispatch";
 import { decideRouting } from "./decision";
 import { getRegistryEntry } from "../open-sse/config/providerRegistry";
 import { getModelPricing } from "../open-sse/services/providerCostData";
@@ -76,8 +83,28 @@ export interface LlmMessage {
   name?: string;
 }
 
+export interface StreamDelta {
+  text?: string;
+  tool_calls?: unknown;
+  stream_mode?: "sse" | "staged";
+}
+
 export interface LlmRequest {
   messages: LlmMessage[];
+  /** Phase 6 M3: true streaming mode. When true, OpenAI-shaped
+   * targets are executed with stream:true and parsed as SSE;
+   * onDelta receives each content/tool fragment as it arrives.
+   * Non-OpenAI formats stay non-streaming and are reported as
+   * stream_mode "staged" (see runLlmStreaming). */
+  stream?: boolean;
+  onDelta?: (delta: StreamDelta) => void;
+  /** Internal mutable streaming state shared with the executor
+   * (set by the streaming executor, read by runLlmStreaming). */
+  streamState?: { emitted: boolean; sseUsed: boolean };
+  /** Custom-provider formats from the registry (llmlib), keyed by
+   * provider id; consulted only when the vendored registry has no
+   * entry for the provider (custom providers are invisible there). */
+  providerFormats?: Record<string, string>;
   /** Explicit target list; when absent, decideRouting ranks and the
    * top `maxTargets` providers WITH keys serve as targets. */
   targets?: DispatchTarget[];
@@ -146,6 +173,16 @@ export interface LlmResult {
    * null when no request executed (no response => no cost exists). */
   costUsd: number | null;
   cost_envelope: CostEnvelope | null;
+  /** Phase 6 M3: "sse" when the serving response truly streamed
+   * over SSE, "staged" otherwise (non-streaming execution whose
+   * text the caller reveals in stages). Never upgraded: a staged
+   * result is not labelled SSE. */
+  stream_mode: "sse" | "staged";
+  /** True when a stream failed AFTER its first delta had already
+   * been emitted: the result is an honest error tail, not a
+   * fallback continuation by another provider. */
+  partial?: boolean;
+  error?: string;
 }
 
 interface RegistryEntryLike {
@@ -228,6 +265,213 @@ export function computeCost(
   return { costUsd: Math.round(cost * 1_000_000) / 1_000_000, priced: !pricing.isEstimated };
 }
 
+
+function formatForTarget(
+  request: LlmRequest,
+  target: DispatchTarget,
+  entry: RegistryEntryLike
+): string {
+  const fromRegistry = (entry.format ?? "").toLowerCase();
+  if (fromRegistry) return fromRegistry;
+  const custom = request.providerFormats?.[target.provider];
+  return (custom ?? "openai").toLowerCase();
+}
+
+interface ToolCallAccum {
+  id: string;
+  type: string;
+  name: string;
+  args: string;
+}
+
+// Phase 6 M3: true SSE streaming executor for OpenAI-shaped targets.
+// Sends stream:true, parses the SSE byte stream incrementally
+// (data: lines, [DONE] terminator, JSON fragments), forwards each
+// content/tool fragment to request.onDelta AS IT ARRIVES, and
+// assembles the same OpenAI-shaped body the non-streaming path
+// returns (content, tool_calls, usage). stream_options asks the
+// provider to include usage in the final chunk; when the provider
+// never sends usage the assembled body has none and cost stays
+// null upstream — usage is never invented here.
+// reuse-check: SSE parsing follows the OpenAI streaming wire
+//   format directly (data: JSON lines terminated by [DONE]); no
+//   upstream gateway streaming machinery is copied, reason: that
+//   machinery is bound to the gateway's SSE relay + client
+//   backpressure model, while this executor only needs to consume
+//   one provider stream and assemble one turn.
+async function executeStreamTarget(
+  request: LlmRequest,
+  target: DispatchTarget,
+  entry: RegistryEntryLike,
+  signal: AbortSignal | undefined
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const url = resolveEndpoint(
+    entry,
+    target.model,
+    request.baseUrlOverrides?.[target.provider]
+  );
+  if (!url) {
+    return { ok: false, status: 0, body: { error: `no endpoint for provider ${target.provider}` } };
+  }
+  const body: Record<string, unknown> = {
+    model: target.model,
+    messages: request.messages,
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  if (request.tools && request.tools.length > 0) {
+    body.tools = request.tools;
+    body.tool_choice = "auto";
+  }
+  if (typeof request.maxTokens === "number") body.max_tokens = request.maxTokens;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: buildHeaders(entry, request.keys[target.provider]),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = null;
+    }
+    return { ok: false, status: res.status, body: parsed };
+  }
+  const state = request.streamState ?? { emitted: false, sseUsed: false };
+  request.streamState = state;
+  const contentType = res.headers?.get?.("content-type") ?? "";
+  if (!res.body || !contentType.includes("text/event-stream")) {
+    // The provider answered a stream request with a plain JSON
+    // body: assemble it, surface its text as ONE staged delta and
+    // do NOT claim SSE (stream_mode stays "staged" upstream).
+    let parsed: unknown = null;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = null;
+    }
+    if (parsed && typeof parsed === "object") {
+      const msg = (parsed as { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }> })
+        .choices?.[0]?.message;
+      const text = typeof msg?.content === "string" ? msg.content : "";
+      if (text || msg?.tool_calls) {
+        state.emitted = true;
+        request.onDelta?.({ text, tool_calls: msg?.tool_calls, stream_mode: "staged" });
+      }
+    }
+    return { ok: true, status: res.status, body: parsed };
+  }
+  state.sseUsed = true;
+  let text = "";
+  let finishReason: string | null = null;
+  let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+  let responseId = "";
+  let responseModel = target.model;
+  const toolAcc = new Map<number, ToolCallAccum>();
+  const emit = (delta: StreamDelta) => {
+    state.emitted = true;
+    request.onDelta?.({ ...delta, stream_mode: "sse" });
+  };
+  const handlePayload = (payload: string) => {
+    if (!payload || payload === "[DONE]") return;
+    let chunk: Record<string, unknown>;
+    try {
+      chunk = JSON.parse(payload) as Record<string, unknown>;
+    } catch {
+      return; // a malformed fragment is skipped, never fabricated
+    }
+    if (typeof chunk.id === "string") responseId = chunk.id;
+    if (typeof chunk.model === "string") responseModel = chunk.model;
+    if (chunk.usage && typeof chunk.usage === "object") {
+      usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number };
+    }
+    const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
+    const choice = choices?.[0];
+    if (!choice) return;
+    if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+    const delta = (choice.delta ?? choice.message ?? {}) as {
+      content?: unknown;
+      tool_calls?: Array<Record<string, unknown>>;
+    };
+    if (typeof delta.content === "string" && delta.content) {
+      text += delta.content;
+      emit({ text: delta.content });
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const frag of delta.tool_calls) {
+        const idx = typeof frag.index === "number" ? frag.index : toolAcc.size;
+        const acc = toolAcc.get(idx) ?? { id: "", type: "function", name: "", args: "" };
+        if (typeof frag.id === "string" && frag.id) acc.id = frag.id;
+        if (typeof frag.type === "string" && frag.type) acc.type = frag.type;
+        const fn = (frag.function ?? {}) as { name?: unknown; arguments?: unknown };
+        if (typeof fn.name === "string") acc.name += fn.name;
+        if (typeof fn.arguments === "string") acc.args += fn.arguments;
+        toolAcc.set(idx, acc);
+      }
+      emit({ tool_calls: delta.tool_calls });
+    }
+  };
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep = buffer.indexOf("\n\n");
+      while (sep >= 0) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        for (const line of block.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data:")) handlePayload(trimmed.slice(5).trim());
+        }
+        sep = buffer.indexOf("\n\n");
+      }
+    }
+  } catch (err) {
+    // Failure AFTER bytes arrived: runLlmStreaming sees
+    // state.emitted and closes the result as partial instead of
+    // falling back. Before any delta this is a plain failure and
+    // the attempt loop may still try the next target.
+    return {
+      ok: false,
+      status: res.status,
+      body: { error: `stream interrupted: ${err instanceof Error ? err.message : String(err)}` },
+    };
+  }
+  // Trailing block without a final blank line.
+  for (const line of buffer.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("data:")) handlePayload(trimmed.slice(5).trim());
+  }
+  const toolCalls = [...toolAcc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, acc]) => ({
+      id: acc.id,
+      type: acc.type,
+      function: { name: acc.name, arguments: acc.args },
+    }));
+  const message: Record<string, unknown> = { role: "assistant", content: text };
+  if (toolCalls.length > 0) message.tool_calls = toolCalls;
+  const assembled: Record<string, unknown> = {
+    id: responseId,
+    model: responseModel,
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
+      },
+    ],
+  };
+  if (usage) assembled.usage = usage;
+  return { ok: true, status: res.status, body: assembled };
+}
+
 async function executeTarget(
   request: LlmRequest,
   target: DispatchTarget,
@@ -265,7 +509,10 @@ async function executeTargetInner(
   signal: AbortSignal | undefined
 ): Promise<{ ok: boolean; status: number; body: unknown }> {
   const entry = (getRegistryEntry(target.provider) ?? {}) as RegistryEntryLike;
-  const format = (entry.format ?? "openai").toLowerCase();
+  const format = formatForTarget(request, target, entry);
+  if (request.stream && (format === "openai" || format === "passthrough")) {
+    return executeStreamTarget(request, target, entry, signal);
+  }
   if (format === "claude") {
     // Lazy import: the Anthropic translator branch (module 1b) must
     // not weigh down the OpenAI-shaped path.
@@ -312,7 +559,7 @@ async function executeTargetInner(
   return { ok: res.ok, status: res.status, body: parsed };
 }
 
-export async function runLlm(request: LlmRequest): Promise<LlmResult> {
+function resolveTargets(request: LlmRequest): DispatchTarget[] {
   let targets = request.targets ?? [];
   if (targets.length === 0) {
     const decision = decideRouting({
@@ -355,6 +602,159 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
       targets.push({ provider: request.provider, model: request.model });
     }
   }
+  return targets;
+}
+
+function costFor(
+  request: LlmRequest,
+  served: DispatchTarget,
+  response: unknown
+): { costUsd: number | null; envelope: CostEnvelope | null } {
+  let costUsd: number | null = null;
+  let envelope: CostEnvelope | null = null;
+  const body = response as {
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const computed = computeCost(
+    served.provider,
+    served.model,
+    body.usage,
+    request.customPricing
+  );
+  if (computed) {
+    costUsd = computed.costUsd;
+    envelope = {
+      estimated: computed.costUsd,
+      actual: computed.costUsd,
+      currency: "USD",
+      priced: computed.priced,
+      usage: {
+        promptTokens: Number(body.usage?.prompt_tokens ?? 0),
+        completionTokens: Number(body.usage?.completion_tokens ?? 0),
+      },
+    };
+  }
+  return { costUsd, envelope };
+}
+
+// Phase 6 M3 streaming attempt loop. Fallback semantics are FIXED:
+// - Before the first delta is emitted, a failed target may fall
+//   through to the next target (attempts are recorded as usual).
+// - After the first delta, a failure MUST close the result as an
+//   honest partial error: no other provider silently continues a
+//   half-written reply.
+// Non-SSE formats (claude and others) execute non-streaming via
+// executeTarget; on success their assembled text is surfaced as
+// staged deltas and stream_mode stays "staged" — never "sse".
+async function runLlmStreaming(
+  request: LlmRequest,
+  targets: DispatchTarget[]
+): Promise<LlmResult> {
+  const setup = setupDispatch({ targets, taskType: request.taskType });
+  const ordered = expandTargets(targets);
+  const scored = scoreTargets(ordered, setup.taskType, setup.weights);
+  const scoreOrder = new Map(
+    scored.map((scoredTarget, i) => [`${scoredTarget.provider}::${scoredTarget.model}`, i]));
+  const attemptOrder = [...ordered].sort(
+    (a, b) =>
+      (scoreOrder.get(`${a.provider}::${a.model}`) ?? 1e9) -
+      (scoreOrder.get(`${b.provider}::${b.model}`) ?? 1e9)
+  );
+  const state = request.streamState ?? { emitted: false, sseUsed: false };
+  request.streamState = state;
+  const attempts: LlmResult["attempts"] = [];
+  for (let index = 0; index < attemptOrder.length; index++) {
+    const target = attemptOrder[index];
+    const outcome = await executeTarget(request, target, undefined);
+    if (outcome.ok && outcome.body !== null && outcome.body !== undefined) {
+      attempts.push({
+        provider: target.provider,
+        model: target.model,
+        status: outcome.status,
+        failureKind: null,
+      });
+      let streamMode: "sse" | "staged" = state.sseUsed ? "sse" : "staged";
+      if (!state.sseUsed && !state.emitted) {
+        // Staged presentation: the whole reply exists already;
+        // surface it as staged delta(s) so the caller can reveal
+        // it in stages (iron rule 4), labelled staged, not SSE.
+        const bodyObj = outcome.body as {
+          choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+        };
+        const message = bodyObj.choices?.[0]?.message;
+        const text = typeof message?.content === "string" ? message.content : "";
+        if (text || message?.tool_calls) {
+          state.emitted = true;
+          request.onDelta?.({
+            text,
+            tool_calls: message?.tool_calls,
+            stream_mode: "staged",
+          });
+        }
+      }
+      const { costUsd, envelope } = costFor(request, target, outcome.body);
+      return {
+        response: outcome.body,
+        provider: target.provider,
+        model: target.model,
+        attempts,
+        fallbackCount: index,
+        costUsd,
+        cost_envelope: envelope,
+        stream_mode: streamMode,
+      };
+    }
+    const rawError =
+      outcome.body && typeof outcome.body === "object"
+        ? (outcome.body as { error?: unknown }).error
+        : undefined;
+    const errorText =
+      typeof rawError === "string"
+        ? rawError
+        : rawError && typeof rawError === "object" &&
+            typeof (rawError as { message?: unknown }).message === "string"
+          ? String((rawError as { message: string }).message)
+          : rawError
+            ? JSON.stringify(rawError)
+            : "";
+    attempts.push({
+      provider: target.provider,
+      model: target.model,
+      status: outcome.status,
+      failureKind: classifyFailure(outcome.status, errorText),
+      ...(errorText ? { error: errorText } : {}),
+    });
+    if (state.emitted) {
+      return {
+        response: null,
+        provider: null,
+        model: null,
+        attempts,
+        fallbackCount: index,
+        costUsd: null,
+        cost_envelope: null,
+        stream_mode: state.sseUsed ? "sse" : "staged",
+        partial: true,
+        error:
+          `stream failed after first delta (partial): ` +
+          (errorText || `status ${outcome.status}`),
+      };
+    }
+  }
+  return {
+    response: null,
+    provider: null,
+    model: null,
+    attempts,
+    fallbackCount: attemptOrder.length,
+    costUsd: null,
+    cost_envelope: null,
+    stream_mode: state.sseUsed ? "sse" : "staged",
+  };
+}
+
+export async function runLlm(request: LlmRequest): Promise<LlmResult> {
+  const targets = resolveTargets(request);
   if (targets.length === 0) {
     return {
       response: null,
@@ -364,7 +764,11 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
       fallbackCount: 0,
       costUsd: null,
       cost_envelope: null,
+      stream_mode: "staged",
     };
+  }
+  if (request.stream) {
+    return runLlmStreaming(request, targets);
   }
   const result = await dispatch(
     { targets, taskType: request.taskType },
@@ -379,28 +783,7 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
   let costUsd: number | null = null;
   let envelope: CostEnvelope | null = null;
   if (result.response && served) {
-    const body = result.response as {
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    };
-    const computed = computeCost(
-      served.provider,
-      served.model,
-      body.usage,
-      request.customPricing
-    );
-    if (computed) {
-      costUsd = computed.costUsd;
-      envelope = {
-        estimated: computed.costUsd,
-        actual: computed.costUsd,
-        currency: "USD",
-        priced: computed.priced,
-        usage: {
-          promptTokens: Number(body.usage?.prompt_tokens ?? 0),
-          completionTokens: Number(body.usage?.completion_tokens ?? 0),
-        },
-      };
-    }
+    ({ costUsd, envelope } = costFor(request, served, result.response));
   }
   return {
     response: result.response,
@@ -416,6 +799,7 @@ export async function runLlm(request: LlmRequest): Promise<LlmResult> {
     fallbackCount: result.fallbackCount,
     costUsd,
     cost_envelope: envelope,
+    stream_mode: "staged",
   };
 }
 

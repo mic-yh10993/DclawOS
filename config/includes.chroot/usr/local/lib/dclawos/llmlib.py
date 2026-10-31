@@ -314,6 +314,14 @@ def build_request(messages, tools=None, task_type=None, provider=None,
                 pricing[f"{pid}::{m['id']}"] = m["pricing"]
     if pricing:
         request["customPricing"] = pricing
+    if custom:
+        # Phase 6 M3: the engine's vendored registry has no entry
+        # for a custom provider, so its format (openai / passthrough
+        # / claude) travels with the request; llm.ts consults it
+        # only for providers the registry does not know.
+        request["providerFormats"] = {
+            pid: entry.get("format", "openai")
+            for pid, entry in custom.items()}
     if max_tokens:
         request["maxTokens"] = max_tokens
     return request
@@ -375,6 +383,95 @@ def call(messages, tools=None, task_type=None, provider=None,
         raise ValueError("dclawos-llm output not valid JSON")
     if not isinstance(result, dict):
         raise ValueError("dclawos-llm output not an object")
+    _record_usage(result, task_type, task_id, session)
+    return result
+
+
+def call_stream(messages, tools=None, task_type=None, provider=None,
+                model=None, targets=None, max_tokens=None,
+                task_id=None, session=None, on_delta=None):
+    """Streaming variant of call() (Phase 6 M3).
+
+    Same request assembly (build_request) and the SAME usage
+    ledger write (_record_usage, exactly once per completed call)
+    as call(); the difference is transport: dclawos-llm is run
+    with --stream and its NDJSON stdout is consumed line by line —
+    each {"type":"delta", ...} line is forwarded to
+    on_delta(delta_dict) as it arrives, and the final
+    {"type":"result", ...} line becomes the return value (the
+    non-streaming result shape plus stream_mode / partial).
+    Keys travel only via the DCLAWOS_LLM_KEYS env var, exactly as
+    in call(). Raises ValueError on transport failure.
+    // reuse-check: subprocess + env-key contract ADOPTED from
+      call() above; the NDJSON line protocol is dclawos-llm
+      --stream's own output shape (see that CLI), not a second
+      streaming protocol invented here.
+    """
+    import threading as _threading
+    keys = available_keys()
+    request = build_request(
+        messages, tools=tools, task_type=task_type,
+        provider=provider, model=model, targets=targets,
+        max_tokens=max_tokens)
+    request["stream"] = True
+    env = dict(os.environ)
+    env["DCLAWOS_LLM_KEYS"] = json.dumps(keys)
+    llm_bin = os.environ.get("DCLAWOS_LLM_BIN", LLM_BIN_DEFAULT)
+    try:
+        proc = subprocess.Popen(
+            [llm_bin, "--stream"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"dclawos-llm transport failed: {exc}")
+    timer = _threading.Timer(CALL_TIMEOUT, proc.kill)
+    timer.daemon = True
+    timer.start()
+    result = None
+    try:
+        try:
+            proc.stdin.write(json.dumps(request))
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "delta":
+                if on_delta is not None:
+                    try:
+                        on_delta(item)
+                    except Exception:  # noqa: BLE001 - a UI-side
+                        pass              # callback must not kill
+            elif item.get("type") == "result":  # the model call
+                result = {k: v for k, v in item.items()
+                          if k != "type"}
+        proc.wait(timeout=10)
+    except Exception as exc:  # noqa: BLE001 - normalised below
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        raise ValueError(f"dclawos-llm stream failed: {exc}")
+    finally:
+        timer.cancel()
+    if proc.returncode not in (0, None):
+        stderr = ""
+        try:
+            stderr = (proc.stderr.read() or "")[:200]
+        except Exception:  # noqa: BLE001
+            stderr = ""
+        raise ValueError(
+            f"dclawos-llm exited {proc.returncode}: {stderr.strip()}")
+    if result is None:
+        raise ValueError("dclawos-llm stream produced no result line")
     _record_usage(result, task_type, task_id, session)
     return result
 

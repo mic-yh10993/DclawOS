@@ -338,12 +338,210 @@ targets. An explicit caller pin is always honoured.
   build environment); everything above is proven against local
   mocks only.
 
+
+## M3 — Chat WebView + true streaming
+
+State: **CLOSED** (this module; build verification in the ledger
+row below).
+
+### Engine true streaming (OpenAI-compatible path)
+
+- `llm.ts` gains a stream mode (`LlmRequest.stream` + `onDelta`):
+  for registry format `openai` / `passthrough` targets the new
+  `executeStreamTarget` sends `stream:true` (with
+  `stream_options.include_usage`), parses the SSE byte stream
+  incrementally (`data:` lines, `[DONE]`, JSON fragments),
+  forwards each content/tool fragment to `onDelta` AS IT
+  ARRIVES, and assembles the same OpenAI-shaped body the
+  non-streaming path returns (content, tool_calls assembled by
+  fragment index, usage when the provider sends it — a provider
+  that sends no usage yields cost null; usage is never invented).
+- A provider that answers a stream request with a plain JSON body
+  is assembled as-is and its text is surfaced as one STAGED delta
+  (never labelled SSE).
+- Attempt loop (`runLlmStreaming`): targets are score-ordered
+  with dispatch's own helpers (`setupDispatch` / `scoreTargets` /
+  `expandTargets` / `classifyFailure` — reused, not re-derived).
+  Fallback semantics are FIXED: before the first delta, a failed
+  target falls through to the next target; AFTER the first delta,
+  a failure closes the result as an honest partial error
+  (`partial: true`, `error` set, response null) — no other
+  provider silently continues a half-written reply. The
+  non-streaming `dispatch()` path is byte-for-byte the pre-M3
+  behaviour apart from the additive envelope field.
+- Result envelope: same shape as non-streaming (response /
+  provider / model / attempts / fallbackCount / costUsd /
+  cost_envelope) plus `stream_mode: "sse" | "staged"` and, on a
+  post-delta failure, `partial` + `error`.
+- Custom providers: the engine registry has no entry for them, so
+  llmlib now forwards their registry format as `providerFormats`
+  (consulted only for providers the vendored registry does not
+  know); builtin formats still come from the registry itself.
+
+### Per-format streaming status (honest table)
+
+| Format | Path | stream_mode |
+|---|---|---|
+| openai | SSE (`stream:true`, incremental parse) | `"sse"` |
+| passthrough | SSE (same executor) | `"sse"` |
+| claude | non-streaming translator branch (llmClaude), whole reply surfaced as staged delta(s) | `"staged"` — 分阶段显现，非供应商流式 |
+| any other registry format | fails closed as before (unsupported format) | `"staged"` on the (failed) envelope; no delta is emitted |
+
+### CLI + llmlib
+
+- `dclawos-llm --stream` (or `"stream":true` in the request):
+  NDJSON on stdout — `{"type":"delta", text?, tool_calls?,
+  stream_mode}` lines as fragments arrive, then exactly one
+  `{"type":"result", ...envelope}` line. Keys still arrive only
+  via `DCLAWOS_LLM_KEYS` and are never printed.
+- `llmlib.call_stream(..., on_delta=...)`: same `build_request`
+  assembly and the SAME `_record_usage` ledger write (exactly
+  once per completed call) as `call()`. Non-streaming `call()`
+  callers (route_decide, compaction, subagents) are unchanged.
+
+### Daemon wiring
+
+- `run_llm_task` now calls `llmlib.call_stream`. `on_delta`
+  publishes fragments as `llm` bus events via
+  `agentlib.log_event` (durable log first, then bus) with data
+  `{delta, stream_mode, conv_session, turn, seq, task_id}`.
+  Coalescing: fragments accumulate until **48 chars** are
+  buffered OR **0.25 s** elapsed since the last publish; the
+  remainder flushes when the call returns. (Constants
+  `STREAM_COALESCE_CHARS` / `STREAM_COALESCE_SECONDS` in
+  dclawos-agent.)
+- Tool-call turns still run through `execute_step`; command /
+  output events (M1) are what the chat page renders as inline
+  step cards. A partial stream closes the task as failed with
+  `result.partial=true` and an error stating the interruption;
+  the final task result carries `stream_mode`.
+
+### Approval cards (display + verdict wiring only)
+
+- `agentlib.request_approval` now publishes its approval events
+  with data `{ticket_id, tool, tier, summary, params}` where
+  params are redacted via `bridgeprotocol.redact_params` BEFORE
+  the event is written or published (ticket files still hold
+  only the params hash + summary — ticketlib is unchanged).
+  Tier comes from `agentlib.classify` (for the broker
+  `set-setting` operation name it reports tier 2, matching
+  settings_set's tier).
+- The chat host renders the card from the event data + the
+  ticket's operation/summary, and decides it through
+  chatlib's field-for-field copy of the dclawos-approve write
+  (status / approved_by="human-gui" / approved_at /
+  ticketlib.save_ticket). There is no second verdict channel,
+  and the ticket trust model (self-approval / tamper-proofing)
+  is NOT touched — that is the later P0 pass, as in M1.
+
+### Chat WebView page + host
+
+- `dclawos-chat` is now a WebKit2 4.1 host in the M2 settings
+  host pattern (typed bridge dispatch, bus subscription
+  forwarding, focus re-read; WebKit missing → explanatory label,
+  no second UI). All logic lives in the new headless
+  `chatlib.ChatHost`; the GTK4 shell migration stays M5.
+- Page: `usr/share/dclawos/chat.html`, single local file, no
+  external resources. Sessions list + switch + new (convlib),
+  history rendering on switch, streaming bubbles (rule-4 reveal
+  on new text nodes only; animation decoupled from arrival),
+  final-reply reconciliation by replacement (no duplicate final
+  text), inline tool step cards from command/output events,
+  inline approval cards, stop button (existing cooperative stop
+  via dclawos-agent-ctl), slash commands (host-side
+  parse_command, transplanted pre-M3 semantics), assign-task
+  Grid fold form, header model switcher (merged catalog,
+  settingslib global default), honest unconfigured banner, and
+  per-reply copy buttons via the host clipboard with the 2.5 s
+  check feedback.
+- Event filtering is HOST-side (chatlib.handle_bus_event): only
+  events whose task_id / task session / conversation belongs to
+  this window are forwarded; task completion is reconciled from
+  ONE event-driven task-file re-read per relevant event and
+  yields exactly one `chat.task_done` page event.
+
+### UI rules on the chat page (deviations named)
+
+Rules 1, 2, 3, 5, 6, 7, 8, 9, 10 are executed verbatim in native
+web form (palette tokens, double-ring focus, dark weights
+360/560, inline-icon -0.125em, tabular-nums, Grid 0fr→1fr,
+text-wrap:pretty, over/under-damped motion tokens, 2.5 s
+self-extinguishing feedback). Rule 4 is now native on this page
+(real CSS `blur(6px)` → clear, 90 ms, binding easing, 30 ms
+stagger cycled every 24 chars so long deltas start immediately)
+— the GTK alpha-ramp deviation recorded in UI-RULES.md no
+longer applies TO THE CHAT PAGE (it still applies to the
+remaining GTK3 surfaces until M5). No other deviation.
+
+### Bridge verbs (chat surface, M3)
+
+`chat.state`, `chat.send`, `chat.history`, `chat.assign`,
+`chat.switch`, `chat.new`, `chat.model.set`, `chat.approve`,
+`chat.deny`, `chat.stop`, `chat.copy`, `chat.launch` — registered
+in bridgeprotocol first, implemented in chatlib, documented in
+docs/BRIDGE-PROTOCOL.md, called by the page last.
+
+### Tests
+
+- New headless gate `chattest.py`, run by hook 1008 and locally:
+  (a) real `dclawos-llm --stream` against a local mock SSE
+  server with delayed chunks — first delta arrives >0.5 s before
+  the result line, delta assembly equals the final reply, usage
+  carried, stream_mode "sse", cost priced from mock usage
+  (gpt-4o-mini mock numbers → 0.00045); a no-usage stream keeps
+  cost null; (b) pre-delta 500 → honest null + exactly one
+  attempt; no keys → llmlib sends nothing and returns a null;
+  (c) real daemon `run_llm_task` over a temp bus — llm delta
+  events arrive in seq order and assemble to the reply, the
+  usage ledger gains exactly one record with null cost on the
+  no-usage endpoint; (d) claude target → delta + result both
+  labelled "staged", never "sse"; (e) ticketlib ticket decided
+  via the host's approve/deny — status/approved_by/approved_at
+  match dclawos-approve; secret-shaped params never appear in
+  the serialised chat.state payload (redacted marker present)
+  nor in agentlib's published approval event; (f) parse_command
+  step structures for /run, /write, /mcp, /subagent identical to
+  the pre-M3 window. Plus bridge allowlist (M3 verbs refused on
+  other surfaces) and host send/model/session verbs.
+- Validate script: M3 static block (chatlib/chattest ship +
+  compile, chat page palette/rule-4/no-external assertions on
+  stripped text, host EventSubscriber/WebKit2 wiring, negative
+  stripped-code checks: no `timeout_add`, no `events_path` in
+  dclawos-chat; llmlib `call_stream`, CLI `--stream`, engine
+  `executeStreamTarget`/`stream_mode`, bridge chat verbs, hook
+  1008 registration). The two Phase 5 chat assertions that
+  pointed at the old GTK window (stream_reveal / copy label)
+  now point at the chat page, where those behaviours live.
+- Local runs before push: chattest, modeltest, settingstest,
+  agentlooptest and eventbustest pass (eventbustest's initial
+  subscribe race flaked once locally and passed on retry — the
+  same race exists on the base commit; agentlooptest needs the
+  image layout under /usr/local, provided locally via symlinks).
+
+### Named limits / not done
+
+- WebView visuals and the page's JS runtime cannot be verified
+  on this headless build machine: the page is gate-checked
+  statically (palette/rule tokens/no external resources) and
+  every host behaviour behind it is covered by chattest; the
+  in-page rendering/animation itself is NOT verified.
+- Real-provider streaming is unverified (no real keys exist in
+  the build environment; per the standing rule all tests use
+  local mocks only). SSE parsing is proven against the mock's
+  OpenAI-shaped chunks, including usage-in-final-chunk.
+- Approval events are a display/verdict wiring only: publisher
+  authentication and ticket tamper-proofing remain the later
+  P0 pass (unchanged from M1's note).
+- The `process` tool's live output remains the M1
+  DEFERRED-NAMED item; step cards show shell steps' live output.
+
 ## Module ledger
 
 | Module | Commit | Run | Result |
 |---|---|---|---|
 | P6-M1 event bus + live output + task wake + bridge core | (this commit) | — | pending |
 | P6-M2 model settings complete (WebView + routing wiring + usage ledger) | (this commit) | — | pending |
+| P6-M3 chat WebView + true streaming (SSE openai/passthrough, staged claude) | (this commit) | — | pending |
 
 ## Later modules (not started)
 

@@ -395,6 +395,29 @@ async function main() {
     }
   }
   request.keys = keys;
+  // Phase 6 M3: streaming mode (--stream flag, or "stream":true in
+  // the request JSON). Deltas go to stdout as NDJSON lines
+  // {"type":"delta", text?, tool_calls?, stream_mode} AS THEY
+  // ARRIVE, followed by exactly one {"type":"result", ...envelope}
+  // line with the same shape as the non-streaming result (plus
+  // stream_mode / partial). Keys never appear on stdout: they only
+  // ever live in request.keys, which is never serialised.
+  // reuse-check: NDJSON framing ADOPTED from eventbus.py's
+  //   newline-JSON socket convention (one JSON object per line);
+  //   the envelope fields are runLlm's own result shape, unchanged.
+  const wantStream =
+    process.argv.includes("--stream") || request.stream === true;
+  if (wantStream) {
+    request.stream = true;
+    request.onDelta = (delta) => {
+      const line = { type: "delta", ...(delta || {}) };
+      process.stdout.write(JSON.stringify(line) + "\n");
+    };
+    const streamed = await runLlm(request);
+    process.stdout.write(
+      JSON.stringify({ type: "result", ...streamed }) + "\n");
+    return;
+  }
   const result = await runLlm(request);
   console.log(JSON.stringify(result));
 }

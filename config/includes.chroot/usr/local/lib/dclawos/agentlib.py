@@ -395,25 +395,54 @@ def classify(tool, params):
     return 2, f"unknown tool: {tool!r}"
 
 
-def request_approval(tool, params, summary, ttl_seconds=600):
+def request_approval(tool, params, summary, ttl_seconds=600,
+                     task_id=None, session=""):
     """Create a ticket and wait for the human verdict.
 
     Returns (verdict, ticket_id): verdict is approved | denied |
     expired | timeout. Full-access mode auto-approves but still
     creates the ticket so the audit trail is complete.
+
+    Phase 6 M3: the approval event carries structured data —
+    ticket_id, tool, tier, summary and the params REDACTED via
+    bridgeprotocol.redact_params — so the chat page can render an
+    inline approval card (real tool + redacted params) and the
+    host can load the ticket itself by id. Ticket files still
+    hold only the params hash + summary (ticketlib contract,
+    unchanged); no secret value ever rides the event: redaction
+    happens HERE, before the event is written or published.
+    // reuse-check: redaction ADOPTED from bridgeprotocol
+      .redact_params (the bridge's single redaction helper);
+      bridgeprotocol imports no local module, so there is no
+      import cycle. The verdict write path is NOT changed here:
+      approvers still write status/approved_by/approved_at onto
+      the ticket file exactly as dclawos-approve does.
     """
     import ticketlib  # local import: ticketlib lives beside this module
     ticket = ticketlib.new_ticket(tool, params, summary, ttl_seconds)
     ticketlib.ensure_dir(ticketlib.tickets_dir())
     ticketlib.save_ticket(ticket)
+    tier, _reason = classify(tool, params)
+    try:
+        import bridgeprotocol
+        safe_params = bridgeprotocol.redact_params(params)
+    except Exception:  # noqa: BLE001 - never leak on redactor failure
+        safe_params = {}
+    approval_data = {"ticket_id": ticket["id"], "tool": tool,
+                     "tier": tier, "summary": summary,
+                     "params": safe_params}
     if full_access_enabled():
         ticket["status"] = "approved"
         ticket["approved_by"] = "full-access-mode"
         ticket["approved_at"] = int(time.time())
         ticketlib.save_ticket(ticket)
-        log_event("approval", f"auto-approved (full-access): {summary}")
+        log_event("approval", f"auto-approved (full-access): {summary}",
+                  session=session, task_id=task_id,
+                  data={**approval_data, "verdict": "approved",
+                        "auto": True})
         return "approved", ticket["id"]
-    log_event("approval", f"approval requested: {summary}")
+    log_event("approval", f"approval requested: {summary}",
+              session=session, task_id=task_id, data=approval_data)
     deadline = time.time() + ttl_seconds
     while time.time() < deadline:
         if stop_requested():
@@ -424,10 +453,14 @@ def request_approval(tool, params, summary, ttl_seconds=600):
             return "expired", ticket["id"]
         status = current.get("status")
         if status == "approved":
-            log_event("approval", f"approved: {summary}")
+            log_event("approval", f"approved: {summary}",
+                      session=session, task_id=task_id,
+                      data={**approval_data, "verdict": "approved"})
             return "approved", ticket["id"]
         if status == "denied":
-            log_event("approval", f"denied: {summary}")
+            log_event("approval", f"denied: {summary}",
+                      session=session, task_id=task_id,
+                      data={**approval_data, "verdict": "denied"})
             return "denied", ticket["id"]
         if status in ("consumed", "expired") or \
                 ticketlib.is_expired(current):

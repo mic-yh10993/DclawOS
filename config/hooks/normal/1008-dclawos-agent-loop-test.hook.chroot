@@ -73,3 +73,15 @@ python3 /usr/local/lib/dclawos/eventbustest.py
     exit 1
 }
 python3 /usr/local/lib/dclawos/modeltest.py
+
+# Phase 6 module M3: chat WebView + true-streaming gate. chattest
+# runs the REAL dclawos-llm --stream against a local mock SSE
+# server (first delta before completion, assembly, usage, sse vs
+# staged labelling, pre-delta failure, no-key honesty), the daemon
+# streaming wiring over the event bus + usage ledger, the chat
+# host approval verdict/redaction path, and parse_command fidelity.
+[ -f /usr/local/lib/dclawos/chattest.py ] || {
+    echo "dclawos-chattest: test script missing" >&2
+    exit 1
+}
+python3 /usr/local/lib/dclawos/chattest.py

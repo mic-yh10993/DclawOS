@@ -1,81 +1,68 @@
 #!/usr/bin/env python3
-"""DclawOS chat window (Phase 3 module 2; Phase 4 module 2).
+"""DclawOS chat window (Phase 3 module 2; Phase 6 module M3).
 
-This is the AI chat page the user can summon at any time (right-click
-"向 AI 提问", Super+Space). Phase 4 connects it to the real model
-call path (dclawos-llm via the agent loop):
+M3 rebuild: the window is now a WebView HOST around the local
+chat page (/usr/share/dclawos/chat.html), following the M2
+dclawos-settings host pattern (WebKit2 4.1, typed bridge dispatch,
+event-bus subscription forwarding, focus re-read). All chat logic
+lives in chatlib.ChatHost (headless, gate-tested by chattest.py):
 
-- Plain text: creates an "llm" task bound to this window's
-  persistent conversation (convlib transcript). When a provider is
-  configured (Settings AI panel + an llm-<provider> secret), the
-  agent loop answers with real model output and can call tools
-  through the approval gates. When NO provider is configured, the
-  task is recorded honestly as model-less — the window never
-  invents model replies.
-- Slash commands create real one-step tasks that the agent service
-  executes through the tiered approval system:
-    /run <argv...>        shell step (argv split, no shell=True)
-    /read <path>          read_file step
-    /write <path> <text>  write_file step (inside agent workspace)
-    /skill <id> [input]   skill_run step
-    /mcp <server> <tool> [json-args]   mcp_call step
-    /connector <id> <message>          connector_send step
-    /route                route_decide step
-    /subagent <goal>      subagent step (child task, waited on)
-    /takeover <kind> <message>         takeover_request step
-    /stop                 stop the agent service (via dclawos-agent-ctl)
-- 指派任务 (Assign task) opens a dialog: title + goal + steps as a
-  JSON array, so multi-step tasks can be assigned from the GUI.
-- The window polls the task queue and the event stream and shows
-  status + results for the tasks it created, plus service events.
+- Plain text creates an "llm" task (kind="llm") bound to this
+  window's persistent conversation (convlib transcript). When a
+  provider is configured the agent loop streams the reply (M3
+  engine SSE path) and the deltas arrive here as pushed bus
+  events — this window contains NO polling timer and never
+  polls the durable event log file. When NO provider is configured, the task is
+  recorded honestly as model-less; no reply is invented.
+- Slash commands (/run /read /write /skill /mcp /connector /route
+  /subagent /takeover /stop /help) keep their pre-M3 semantics
+  (chatlib.parse_command, transplanted from the old window).
+- Inline approval cards in the page are decided by the host via
+  chatlib's copy of the dclawos-approve verdict write; tool steps
+  and live output are forwarded from the bus, filtered host-side
+  to this window's tasks (chatlib.handle_bus_event).
+- If WebKit2 is unavailable the window degrades to an explanatory
+  label (no second full UI is maintained). The GTK4 shell
+  migration is M5, not this module.
 
-A task result that says "no steps" is a real state, not a failure:
-it means the message was queued for a future model step. When a
-provider is configured (settings AI panel + secrets page), a later
-phase can attach model steps to plain messages; until then the UI
-says so in its header note.
-
-// reuse-check: OpenClaw chat UI is a web page with a message list
-  and input box; only that interaction PATTERN (messages + input +
-  task creation) is reused. No OpenClaw UI code is copied: this is a
-  native GTK3 window over the DclawOS task queue.
+The binary name and launch entry are unchanged.
 """
 
 import json
 import os
-import shlex
 import subprocess
 import sys
-import time
 
 sys.path.insert(0, "/usr/local/lib/dclawos")
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "lib", "dclawos"))
 
 try:
-    import agentlib
-    import convlib
+    import bridgeprotocol
+    import chatlib
+    import settingslib
 except ImportError:
-    agentlib = None
-    convlib = None
+    bridgeprotocol = None
+    chatlib = None
+    settingslib = None
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib  # noqa: E402
 
-POLL_MS = 1000
+CHAT_PAGE_PATH = "/usr/share/dclawos/chat.html"
+HELP_TEXT = chatlib.HELP_TEXT if chatlib is not None else ""
 
-HELP_TEXT = (
-    "命令：/run /read /write /skill /mcp /connector /route "
-    "/subagent /takeover /stop；普通文字创建任务（无步骤时如实记录）。"
-)
+
+def log(msg):
+    print(f"dclawos-chat: {msg}", flush=True)
 
 
 class ChatWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-chat — AI 聊天")
-        self.set_default_size(760, 520)
+        self.set_default_size(900, 620)
         try:
             import theme
             theme.apply_theme()
@@ -86,396 +73,174 @@ class ChatWindow(Gtk.Window):
         header.set_subtitle("指派任务与工具控制台")
         header.set_show_close_button(True)
         self.set_titlebar(header)
-        self.known_tasks = {}  # task id -> last known status
-        self.shown_events = 0
-        self.last_reply = ""
-        self.conv_session = self._load_conv_session()
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
+        self.host = chatlib.ChatHost(
+            clipboard_fn=self._clipboard_copy) \
+            if chatlib is not None else None
+        self.webview = None
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(box)
-
-        note = Gtk.Label(
-            label="AI 聊天：普通消息走大模型对话（需在「设置 → AI」选好"
-                  "供应商并在「密钥」页保存 llm-<供应商> 密钥；未配置时"
-                  "如实记录、不伪造回答）。/命令 直接指派工具步骤。")
-        note.set_line_wrap(True)
-        note.set_halign(Gtk.Align.START)
-        box.pack_start(note, False, False, 0)
-
-        self.status = Gtk.Label(label="")
-        self.status.set_halign(Gtk.Align.START)
         try:
-            import theme
-            theme.apply_tnum(self.status)
-        except Exception:
-            pass
-        box.pack_start(self.status, False, False, 0)
-
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC,
-                            Gtk.PolicyType.AUTOMATIC)
-        self.view = Gtk.TextView()
-        self.view.set_editable(False)
-        self.view.set_cursor_visible(False)
-        self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        scrolled.add(self.view)
-        box.pack_start(scrolled, True, True, 0)
-        self.buffer = self.view.get_buffer()
-
-        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                            spacing=6)
-        self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("输入消息或 /命令……（/help 看命令）")
-        self.entry.connect("activate", self.on_send)
-        entry_row.pack_start(self.entry, True, True, 0)
-        send_btn = Gtk.Button(label="发送")
-        send_btn.connect("clicked", self.on_send)
-        entry_row.pack_start(send_btn, False, False, 0)
-        box.pack_start(entry_row, False, False, 0)
-
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        assign_btn = Gtk.Button(label="指派任务…")
-        assign_btn.connect("clicked", self.on_assign)
-        btn_row.pack_start(assign_btn, False, False, 0)
-        dash_btn = Gtk.Button(label="打开看板")
-        dash_btn.connect("clicked", self._launch, "dclawos-dashboard")
-        btn_row.pack_start(dash_btn, False, False, 0)
-        mon_btn = Gtk.Button(label="监视 AI")
-        mon_btn.connect("clicked", self._launch, "dclawos-monitor")
-        btn_row.pack_start(mon_btn, False, False, 0)
-        set_btn = Gtk.Button(label="设置")
-        set_btn.connect("clicked", self._launch, "dclawos-settings")
-        btn_row.pack_start(set_btn, False, False, 0)
-        copy_btn = Gtk.Button(label="复制回答")
-        copy_btn.connect("clicked", self.on_copy_reply)
-        btn_row.pack_start(copy_btn, False, False, 0)
-        self.copy_btn = copy_btn
-        box.pack_start(btn_row, False, False, 0)
-
-        self.append_line("系统：聊天窗口已就绪。" + HELP_TEXT)
-        self._restore_history()
-        GLib.timeout_add(POLL_MS, self.poll)
-
-    def _session_file(self):
-        base = os.environ.get("XDG_CONFIG_HOME") or \
-            os.path.expanduser("~/.config")
-        return os.path.join(base, "dclawos", "chat-session")
-
-    def _load_conv_session(self):
-        """The window's persistent conversation id (survives restarts
-        so the transcript continues; the transcript itself lives in
-        the shared conversation store)."""
-        try:
-            with open(self._session_file(), "r",
-                      encoding="utf-8") as handle:
-                value = handle.read().strip()
-            if convlib is not None and \
-                    convlib.SESSION_ID_RE.match(value):
-                return value
-        except OSError:
-            pass
-        import secrets as _secrets
-        value = _secrets.token_hex(8)
-        try:
-            os.makedirs(os.path.dirname(self._session_file()),
-                        exist_ok=True)
-            with open(self._session_file(), "w",
-                      encoding="utf-8") as handle:
-                handle.write(value)
-        except OSError:
-            pass
-        return value
-
-    def _restore_history(self):
-        if convlib is None:
+            gi.require_version("WebKit2", "4.1")
+            from gi.repository import WebKit2
+        except (ImportError, ValueError) as exc:
+            label = Gtk.Label(
+                label=f"WebKitGTK 4.1 不可用（{exc}），聊天 WebView "
+                      "无法加载。模型与任务仍可通过看板与设置使用；"
+                      "本窗口不维护第二套界面。")
+            label.set_line_wrap(True)
+            label.set_halign(Gtk.Align.START)
+            box.pack_start(label, True, True, 8)
             return
+        manager = WebKit2.UserContentManager()
+        manager.register_script_message_handler("dclawos")
+        manager.connect("script-message-received::dclawos",
+                        self._on_bridge_message)
         try:
-            entries = convlib.load_entries(self.conv_session)
-        except (OSError, ValueError):
-            return
-        for entry in entries[-20:]:
-            if entry.get("kind") != "message":
-                continue
-            message = entry.get("message") or {}
-            content = message.get("content")
-            if not isinstance(content, str) or not content:
-                continue
-            if message.get("role") == "user":
-                self.append_line(f"你：{content}")
-            elif message.get("role") == "assistant":
-                self.append_line(f"AI：{content}")
-
-    def _launch(self, _button, command):
-        try:
-            subprocess.Popen([command])
-        except OSError as exc:
-            self.append_line(f"系统：启动 {command} 失败：{exc}")
-
-    def _scroll_to_end(self):
-        mark = self.buffer.create_mark(None, self.buffer.get_end_iter(),
-                                       False)
-        self.view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
-
-    def append_line(self, text):
-        # A streamed reply may have left the last line open (no
-        # trailing newline yet); close it before appending.
-        if self.buffer.get_char_count() > 0:
-            last = self.buffer.get_iter_at_offset(
-                self.buffer.get_char_count() - 1)
-            if last.get_char() != "\n":
-                self.buffer.insert(self.buffer.get_end_iter(), "\n")
-        end = self.buffer.get_end_iter()
-        self.buffer.insert(end, text + "\n")
-        self._scroll_to_end()
-
-    def append_reply(self, text):
-        """An AI reply: iron rule 4 staged reveal (theme helper),
-        with a plain append as the fallback. The transcript line
-        stays open (no trailing newline) until the next append."""
-        self.last_reply = text
-        if self.buffer.get_char_count() > 0:
-            last = self.buffer.get_iter_at_offset(
-                self.buffer.get_char_count() - 1)
-            if last.get_char() != "\n":
-                self.buffer.insert(self.buffer.get_end_iter(), "\n")
-        self.buffer.insert(self.buffer.get_end_iter(), "AI：")
-        try:
-            import theme
-            if theme.stream_reveal(self.view, text,
-                                   scroll_cb=self._scroll_to_end):
-                return
-        except Exception:
-            pass
-        self.buffer.insert(self.buffer.get_end_iter(), text)
-        self._scroll_to_end()
-
-    def on_copy_reply(self, _button):
-        """Iron rule 10: copy feedback shows a check and restores
-        itself after 2.5 s (theme.flash_feedback)."""
-        if not self.last_reply:
-            self.append_line("系统：还没有可复制的 AI 回答。")
-            return
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(self.last_reply, -1)
-        try:
-            import theme
-            theme.flash_feedback(self.copy_btn, "✓ 已复制", "复制回答")
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------ tasks
-
-    def create_task(self, title, goal, steps, kind="steps"):
-        if agentlib is None:
-            self.append_line("系统：agentlib 不可用，无法创建任务。")
-            return None
-        try:
-            task = agentlib.new_task(title, goal, steps)
-            if kind == "llm":
-                task["kind"] = "llm"
-                task["conv_session"] = self.conv_session
-            agentlib.save_task(task)
-        except (OSError, ValueError) as exc:
-            self.append_line(f"系统：创建任务失败：{exc}")
-            return None
-        self.known_tasks[task["id"]] = task["status"]
-        self.append_line(f"你：{title}")
-        return task
-
-    def parse_command(self, text):
-        """Parse a /command line into (title, goal, steps) or None."""
-        try:
-            parts = shlex.split(text)
-        except ValueError as exc:
-            self.append_line(f"系统：命令解析失败：{exc}")
-            return None
-        if not parts:
-            return None
-        cmd, args = parts[0], parts[1:]
-        if cmd == "/help":
-            self.append_line("系统：" + HELP_TEXT)
-            return None
-        if cmd == "/stop":
-            try:
-                subprocess.Popen(["dclawos-agent-ctl", "stop"])
-                self.append_line("系统：已请求停止 agent 服务。")
-            except OSError as exc:
-                self.append_line(f"系统：停止失败：{exc}")
-            return None
-        if cmd == "/run" and args:
-            return ("shell 命令", " ".join(args),
-                    [{"tool": "shell", "params": {"argv": args}}])
-        if cmd == "/read" and len(args) == 1:
-            return ("读取文件", args[0],
-                    [{"tool": "read_file", "params": {"path": args[0]}}])
-        if cmd == "/write" and len(args) >= 2:
-            path = args[0]
-            raw = text.split(None, 2)
-            content = raw[2] if len(raw) > 2 else ""
-            return ("写入文件", path,
-                    [{"tool": "write_file",
-                      "params": {"path": path, "content": content}}])
-        if cmd == "/skill" and args:
-            raw = text.split(None, 2)
-            return ("运行 Skill", args[0],
-                    [{"tool": "skill_run",
-                      "params": {"skill": args[0],
-                                 "input": raw[2] if len(raw) > 2 else ""}}])
-        if cmd == "/mcp" and len(args) >= 2:
-            raw = text.split(None, 3)
-            try:
-                call_args = json.loads(raw[3]) if len(raw) > 3 else {}
-            except ValueError as exc:
-                self.append_line(f"系统：mcp 参数不是合法 JSON：{exc}")
-                return None
-            return ("调用 MCP", f"{args[0]}.{args[1]}",
-                    [{"tool": "mcp_call",
-                      "params": {"server": args[0], "tool": args[1],
-                                 "arguments": call_args}}])
-        if cmd == "/connector" and len(args) >= 2:
-            raw = text.split(None, 2)
-            return ("发送连接器消息", args[0],
-                    [{"tool": "connector_send",
-                      "params": {"connector": args[0],
-                                 "message": raw[2] if len(raw) > 2 else ""}}])
-        if cmd == "/route":
-            return ("路由决策", "route_decide",
-                    [{"tool": "route_decide", "params": {}}])
-        if cmd == "/subagent" and args:
-            goal = text.split(None, 1)[1]
-            return ("指派子代理", goal,
-                    [{"tool": "subagent",
-                      "params": {"goal": goal, "steps": []}}])
-        if cmd == "/takeover" and len(args) >= 2:
-            raw = text.split(None, 2)
-            return ("请求人工接管", args[0],
-                    [{"tool": "takeover_request",
-                      "params": {"kind": args[0],
-                                 "message": raw[2] if len(raw) > 2 else ""}}])
-        self.append_line(f"系统：未知或参数不足的命令：{cmd}（/help 看列表）")
-        return None
-
-    def on_send(self, _widget):
-        text = self.entry.get_text().strip()
-        if not text:
-            return
-        self.entry.set_text("")
-        if text.startswith("/"):
-            parsed = self.parse_command(text)
-            if parsed is not None:
-                self.create_task(*parsed)
+            webview = WebKit2.WebView.new_with_user_content_manager(
+                manager)
+        except Exception:  # noqa: BLE001 - older binding shape
+            webview = WebKit2.WebView()
+        self.webview = webview
+        if os.path.exists(CHAT_PAGE_PATH):
+            webview.load_uri("file://" + CHAT_PAGE_PATH)
         else:
-            self.create_task(text[:80], text, [], kind="llm")
-
-    def on_assign(self, _button):
-        dialog = Gtk.Dialog(title="指派任务", transient_for=self,
-                            flags=Gtk.DialogFlags.MODAL)
-        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        dialog.add_button("创建", Gtk.ResponseType.OK)
-        area = dialog.get_content_area()
-        area.set_border_width(8)
-        title_entry = Gtk.Entry()
-        area.pack_start(Gtk.Label(label="标题："), False, False, 0)
-        area.pack_start(title_entry, False, False, 0)
-        goal_entry = Gtk.Entry()
-        area.pack_start(Gtk.Label(label="目标："), False, False, 0)
-        area.pack_start(goal_entry, False, False, 0)
-        steps_view = Gtk.TextView()
-        steps_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        steps_scroll = Gtk.ScrolledWindow()
-        steps_scroll.set_min_content_height(120)
-        steps_scroll.add(steps_view)
-        area.pack_start(
-            Gtk.Label(label="步骤（JSON 数组，如 "
-                            '[{"tool": "shell", "params": {"argv": '
-                            '["ls"]}}]）：'), False, False, 0)
-        area.pack_start(steps_scroll, True, True, 0)
-        dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
-            title = title_entry.get_text().strip() or "指派任务"
-            goal = goal_entry.get_text().strip()
-            steps_text = steps_view.get_buffer().get_text(
-                steps_view.get_buffer().get_start_iter(),
-                steps_view.get_buffer().get_end_iter(), True).strip()
-            try:
-                steps = json.loads(steps_text) if steps_text else []
-                if not isinstance(steps, list):
-                    raise ValueError("步骤必须是 JSON 数组")
-            except ValueError as exc:
-                self.append_line(f"系统：步骤 JSON 无效：{exc}")
-                dialog.destroy()
-                return
-            self.create_task(title, goal, steps)
-        dialog.destroy()
-
-    # ------------------------------------------------------------ poll
-
-    def poll(self):
-        if agentlib is None:
-            return True
+            webview.load_html(
+                "<html><body><p>聊天页面资源缺失："
+                + CHAT_PAGE_PATH + "</p></body></html>", "file:///")
+        box.pack_start(webview, True, True, 0)
+        # Push: subscribe to the M1 event bus; chatlib filters to
+        # this window's tasks/conversation before anything is
+        # forwarded to the page. Subscription lifecycle only —
+        # there is deliberately no display polling timer here.
+        self._subscriber = None
         try:
-            tasks = agentlib.list_tasks()
-        except (OSError, ValueError):
-            tasks = []
-        counts = {"queued": 0, "running": 0, "done": 0, "failed": 0,
-                  "cancelled": 0}
-        for task in tasks:
-            counts[task.get("status", "?")] = \
-                counts.get(task.get("status", "?"), 0) + 1
-            tid = task["id"]
-            status = task.get("status")
-            if tid in self.known_tasks and \
-                    self.known_tasks[tid] != status and \
-                    status in ("done", "failed", "cancelled"):
-                result = task.get("result") or {}
-                if task.get("kind") == "llm" and \
-                        isinstance(result, dict) and result.get("reply"):
-                    self.append_reply(result["reply"])
-                elif task.get("kind") == "llm" and \
-                        isinstance(result, dict) and \
-                        result.get("model_configured") is False:
-                    self.append_line(
-                        "系统：未配置供应商密钥，本条消息已如实记录，"
-                        "没有生成模型回答。")
+            import eventbus
+            self._subscriber = eventbus.EventSubscriber(
+                self._on_bus_event).start()
+        except Exception as exc:  # noqa: BLE001 - push is additive
+            log(f"event subscription unavailable: {exc}")
+        self.connect("focus-in-event", self._on_focus_in)
+
+    # ------------------------------------------------------------ bridge
+
+    def _clipboard_copy(self, text):
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(text, -1)
+
+    def _on_focus_in(self, _window, _event):
+        # Re-read shared state on focus (M2 host pattern): the page
+        # refreshes its session/model state from the shared stores.
+        self._push_event("settings", {"reason": "focus"})
+        return False
+
+    def _on_bus_event(self, event):
+        if self.host is None:
+            return
+        try:
+            forwarded = self.host.handle_bus_event(event)
+        except Exception:  # noqa: BLE001 - forwarding is additive
+            return
+        for item in forwarded:
+            self._push_event(item.get("type", "system"),
+                             item.get("data") or {})
+
+    def _push_event(self, event_type, data):
+        if self.webview is None or bridgeprotocol is None:
+            return
+        try:
+            message = bridgeprotocol.make_event(event_type, data)
+        except Exception:  # noqa: BLE001
+            return
+        self._send_to_page(message)
+
+    def _send_to_page(self, message):
+        webview = self.webview
+        if webview is None:
+            return
+        script = "window.__dclawosReceive && window.__dclawosReceive(" \
+            + json.dumps(message, ensure_ascii=False) + ");"
+
+        def _do():
+            try:
+                if hasattr(webview, "evaluate_javascript"):
+                    webview.evaluate_javascript(
+                        script, -1, None, None, None, None)
                 else:
-                    shown = json.dumps(
-                        result or task.get("error") or "",
-                        ensure_ascii=False)[:400]
-                    self.append_line(
-                        f"任务完成 [{task.get('title', tid)}] "
-                        f"{status}：{shown}")
-            self.known_tasks[tid] = status
-        self.status.set_text(
-            f"队列：{counts.get('queued', 0)} 等待，"
-            f"{counts.get('running', 0)} 运行中，"
-            f"{counts.get('done', 0)} 完成，"
-            f"{counts.get('failed', 0)} 失败。")
+                    webview.run_javascript(script, None, None, None)
+            except Exception:  # noqa: BLE001 - page may be reloading
+                pass
+            return False
+
+        GLib.idle_add(_do)
+
+    def _on_bridge_message(self, _manager, js_result):
+        if bridgeprotocol is None or self.host is None:
+            return
         try:
-            with open(agentlib.events_path(), "r",
-                      encoding="utf-8") as handle:
-                lines = handle.readlines()
-        except OSError:
-            lines = []
-        for line in lines[self.shown_events:]:
             try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("type") in ("approval", "takeover"):
-                self.append_line(
-                    f"事件 [{event.get('type')}] "
-                    f"{event.get('summary', '')}")
-        self.shown_events = len(lines)
-        return True
+                value = js_result.get_js_value()
+                text = value.to_string()
+            except Exception:  # noqa: BLE001 - older binding shape
+                text = js_result.to_string()
+            message = json.loads(text)
+        except Exception:  # noqa: BLE001 - untrusted input
+            return
+        if isinstance(message, dict) and message.get("kind") == "hello":
+            try:
+                bridgeprotocol.validate_hello(message)
+            except bridgeprotocol.BridgeError as exc:
+                self._send_to_page(exc.to_error(None))
+                return
+            self._send_to_page(bridgeprotocol.make_hello_ack("chat"))
+            try:
+                if settingslib is not None and \
+                        settingslib.get_setting("ui-dark"):
+                    script = "document.body.classList.add('dark');"
+
+                    def _do_dark():
+                        try:
+                            if hasattr(self.webview,
+                                       "evaluate_javascript"):
+                                self.webview.evaluate_javascript(
+                                    script, -1, None, None, None, None)
+                            else:
+                                self.webview.run_javascript(
+                                    script, None, None, None)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return False
+
+                    GLib.idle_add(_do_dark)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            command = bridgeprotocol.validate_command(message, "chat")
+        except bridgeprotocol.BridgeError as exc:
+            request_id = message.get("id") if isinstance(
+                message, dict) else None
+            self._send_to_page(exc.to_error(request_id))
+            return
+        verb = command["command"]
+        params = command["params"]
+        request_id = command["id"]
+        try:
+            result = self.host.dispatch(verb, params)
+        except Exception as exc:  # noqa: BLE001 - typed error reply
+            self._send_to_page(bridgeprotocol.make_error(
+                request_id, "handler_error", str(exc)[:500]))
+            return
+        self._send_to_page(bridgeprotocol.make_reply(
+            request_id, result))
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print("usage: dclawos-chat (creates tasks for dclawos-agent)")
         return 0
-    log = print
-    log("dclawos-chat started (Phase 3 module 2: chat + task assignment)")
+    log("dclawos-chat started (Phase 6 M3: WebView chat + streaming)")
     win = ChatWindow()
     win.connect("destroy", Gtk.main_quit)
     win.show_all()

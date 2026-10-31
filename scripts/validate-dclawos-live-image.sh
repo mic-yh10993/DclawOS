@@ -653,12 +653,17 @@ grep -q 'ui-dark' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
     echo "settings lacks the dark-mode toggle" >&2
     exit 1
 }
-grep -q 'stream_reveal' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
-    echo "chat does not apply the stream reveal" >&2
+# Phase 6 M3 supersedes the two Phase 5 chat assertions below in
+# their original location: the chat window is now a WebView host
+# and rule 4 (blur reveal) + the copy feedback live in the chat
+# PAGE (usr/share/dclawos/chat.html), asserted in the M3 block.
+unsquashfs -d "$WORK/chatpage-p5-extract" "$FS" usr/share/dclawos/chat.html >/dev/null 2>&1
+grep -q 'blur(6px)' "$WORK/chatpage-p5-extract/usr/share/dclawos/chat.html" || {
+    echo "chat page does not apply the rule-4 blur reveal" >&2
     exit 1
 }
-grep -q '复制回答' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
-    echo "chat lacks the copy-answer feedback action" >&2
+grep -q '已复制' "$WORK/chatpage-p5-extract/usr/share/dclawos/chat.html" || {
+    echo "chat page lacks the copy-answer feedback action" >&2
     exit 1
 }
 grep -q 'build_channels_panel' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
@@ -887,7 +892,104 @@ grep -q 'modeltest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chr
     exit 1
 }
 
+# Phase 6 module M3: chat WebView + true streaming. The chat libs +
+# gate test + WebView page must ship and compile; the page must
+# execute the iron rules in native web form (palette, no pure
+# black, rule-4 90ms blur(6px) reveal with the binding easing,
+# tabular-nums, text-wrap:pretty, Grid fold, 2.5s feedback — all
+# on comment-stripped text); the chat host must subscribe to the
+# event bus with NO polling timer and NO event-log file read left
+# in stripped code; llmlib / dclawos-llm must carry the streaming
+# symbols; the engine source must carry the SSE executor; the
+# bridge registry must carry the M3 chat verbs; hook 1008 must
+# run chattest. Behavior is gated by hook 1008 (chattest).
+for lib in chatlib chattest; do
+    unsquashfs -d "$WORK/${lib}-p6m3-extract" "$FS" "usr/local/lib/dclawos/${lib}.py" >/dev/null 2>&1
+    test -f "$WORK/${lib}-p6m3-extract/usr/local/lib/dclawos/${lib}.py"
+    python3 -m py_compile "$WORK/${lib}-p6m3-extract/usr/local/lib/dclawos/${lib}.py"
+done
+grep -q 'class ChatHost' "$WORK/chatlib-p6m3-extract/usr/local/lib/dclawos/chatlib.py" || {
+    echo "chatlib lacks the ChatHost" >&2
+    exit 1
+}
+grep -q 'def parse_command' "$WORK/chatlib-p6m3-extract/usr/local/lib/dclawos/chatlib.py" || {
+    echo "chatlib lacks the transplanted parse_command" >&2
+    exit 1
+}
+grep -q 'def call_stream' "$WORK/llmlib-p6m2-extract/usr/local/lib/dclawos/llmlib.py" || {
+    echo "llmlib lacks the M3 streaming call" >&2
+    exit 1
+}
+grep -q -- '--stream' "$WORK/llm-extract/usr/local/bin/dclawos-llm" || {
+    echo "dclawos-llm lacks the M3 --stream mode" >&2
+    exit 1
+}
+unsquashfs -d "$WORK/llmts-p6m3-extract" "$FS" usr/share/dclawos/engine-src/dclawos/llm.ts >/dev/null 2>&1
+grep -q 'executeStreamTarget' "$WORK/llmts-p6m3-extract/usr/share/dclawos/engine-src/dclawos/llm.ts" || {
+    echo "engine llm.ts lacks the SSE streaming executor" >&2
+    exit 1
+}
+grep -q 'stream_mode' "$WORK/llmts-p6m3-extract/usr/share/dclawos/engine-src/dclawos/llm.ts" || {
+    echo "engine llm.ts lacks the stream_mode envelope field" >&2
+    exit 1
+}
+grep -q 'chat.model.set' "$WORK/bridgeprotocol-p6m1-extract/usr/local/lib/dclawos/bridgeprotocol.py" || {
+    echo "bridgeprotocol lacks the M3 chat verbs" >&2
+    exit 1
+}
+grep -q 'EventSubscriber' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat host does not subscribe to the event bus" >&2
+    exit 1
+}
+grep -q 'WebKit2' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat host does not load WebKit2 (M3 WebView missing)" >&2
+    exit 1
+}
+if strip_py "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" | grep -q 'timeout_add'; then
+    echo "chat host still has a display polling timer" >&2
+    exit 1
+fi
+if strip_py "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" | grep -q 'events_path'; then
+    echo "chat host still reads the event log file" >&2
+    exit 1
+fi
+python3 - "$WORK/chatpage-p5-extract/usr/share/dclawos/chat.html" <<'PYEOF'
+import re, sys
+page = open(sys.argv[1], encoding="utf-8").read()
+stripped = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.S)
+assert "#000" not in stripped, "chat page uses pure black"
+for token in ("#f5f5f3", "#fcfcfb", "#0b0b0a", "#151515",
+              "#1a1a19", "#20201e"):
+    assert token in stripped, f"chat page lost palette token {token}"
+assert "90ms" in stripped, "chat page lacks the rule-4 90ms reveal"
+assert "blur(6px)" in stripped, "chat page lacks the rule-4 blur(6px)"
+assert "cubic-bezier(.215,.61,.355,1)" in stripped, \
+    "chat page lacks the binding easing"
+assert "tabular-nums" in stripped, "chat page lacks tabular-nums"
+assert "text-wrap:pretty" in stripped.replace(" ", ""), \
+    "chat page lacks text-wrap:pretty"
+assert "grid-template-rows:0fr" in stripped.replace(" ", ""), \
+    "chat page lacks the Grid 0fr->1fr fold"
+assert "vertical-align:-0.125em" in stripped.replace(" ", ""), \
+    "chat page lacks the inline-icon alignment"
+assert "2500" in stripped, "chat page lacks the 2.5s feedback timer"
+assert not re.search(r'(?:src|href)\s*=\s*"https?://', stripped), \
+    "chat page references an external resource"
+assert "__dclawosReceive" in stripped, \
+    "chat page lacks the bridge receiver"
+assert "chat.approve" in stripped, \
+    "chat page does not decide approvals via the bridge"
+assert "chat.model.set" in stripped, \
+    "chat page does not switch models via the bridge"
+PYEOF
+grep -q 'chattest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.chroot || {
+    echo "hook 1008 lacks the chattest call" >&2
+    exit 1
+}
+
 # Initramfs must contain live-boot (the live session depends on it).
+
 lsinitramfs "$INITRD" | grep -q 'scripts/live' || {
     echo "initramfs lacks live-boot scripts" >&2
     exit 1

@@ -71,7 +71,7 @@ refused with `unsupported_protocol` — never silently downgraded.
 |---|---|
 | host (all surfaces) | `hello`, `ping` |
 | settings (M2) | `settings.get`, `settings.set`, `secret.set` (secret-bearing), `registry.list`, `model.catalog`, `model.provider.save`, `model.provider.delete`, `model.provider.override`, `model.provider.reset`, `model.config.get`, `model.config.save`, `model.health`, `model.test`, `model.usage` |
-| chat (M3) | `chat.send`, `chat.history` |
+| chat (M3) | `chat.state`, `chat.send`, `chat.history`, `chat.assign`, `chat.switch`, `chat.new`, `chat.model.set`, `chat.approve`, `chat.deny`, `chat.stop`, `chat.copy`, `chat.launch` |
 | dashboard (M4) | `dashboard.snapshot`, `takeover.open`, `event.ack` |
 
 A verb allowlisted for one surface is refused on another.
@@ -99,6 +99,36 @@ and all replies/events pass the secret stripping in
 | `model.test` | `{provider, model}` | `{ok, configured, provider, model, attempts, latency_ms, cost_usd, error}` — one minimal real request; `configured: false` means no key exists and NO request was sent | no |
 | `model.usage` | `{}` | usage aggregation from `/var/lib/dclawos/usage.jsonl` (totals, per-provider / per-model rows, known vs unknown cost counts) | no |
 | `secret.set` | `{name: "llm-<provider>", value: <key>}` | `{ok, message}` — write-only via the existing approval + broker write-secret flow; the value never appears in any reply or event | **yes (write-only)** |
+
+## Chat verbs (Phase 6 M3)
+
+All on the `chat` surface, implemented by typed handlers in
+`chatlib.ChatHost.dispatch` (the `dclawos-chat` WebView host is a
+thin GTK/WebKit shell around it). None is secret-bearing; the
+approval params a page may see are redacted host-side
+(`bridgeprotocol.redact_params`) before they cross, and replies
+pass the bridge secret stripping as usual.
+
+| Verb | Params | Reply | Secret? |
+|---|---|---|---|
+| `chat.state` | `{}` | `{sessions, current_session, messages, model: {provider, model, configured, providers}, approvals, help}` — sessions from convlib, messages = current transcript projection, model = merged catalog + shared-settings default + key-configured booleans only | no |
+| `chat.history` | `{session}` | `{session, messages}` — transcript projection for one session | no |
+| `chat.send` | `{text}` | `{action: "task", task_id, title}` or `{action: "reply", text}` — plain text creates an llm task bound to the current conversation; `/…` lines go through chatlib.parse_command (pre-M3 semantics) | no |
+| `chat.assign` | `{title, goal, steps}` | `{action: "task", task_id, title}` — steps must be a JSON array | no |
+| `chat.switch` | `{session}` | `{session, messages}` — validates the 16-hex session id, persists it as the current session | no |
+| `chat.new` | `{}` | `{session, messages: []}` — creates + persists a fresh session | no |
+| `chat.model.set` | `{provider, model}` | `{model}` — writes the global default via settingslib.apply_setting (ai-provider / ai-model), the M2 shared store | no |
+| `chat.approve` / `chat.deny` | `{ticket_id}` | `{ticket_id, status}` — the host writes the verdict onto the ticket file exactly as dclawos-approve does (status / approved_by="human-gui" / approved_at via ticketlib); no other verdict channel exists | no |
+| `chat.stop` | `{}` | `{stopped, message}` — the existing cooperative stop only (dclawos-agent-ctl stop) | no |
+| `chat.copy` | `{text?}` | `{copied, length}` — host clipboard (Gtk Clipboard in the shell); defaults to the last AI reply | no |
+| `chat.launch` | `{target: dashboard\|monitor\|settings}` | `{launched}` — host-side Popen of the sibling app | no |
+
+Pushed events to the chat page: event-bus events filtered
+host-side to this window's tasks/conversation (llm deltas,
+command/output step events, approval cards/verdicts), plus the
+host-synthesised `chat.task_done` reconciliation event (exactly
+once per finished known task, carrying the task result the page
+reconciles its streamed bubble against).
 
 ## Event forwarding shape
 
