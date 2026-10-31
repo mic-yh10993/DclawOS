@@ -50,6 +50,13 @@ Every completed call appends one record to the durable usage
 ledger (usagelib, /var/lib/dclawos/usage.jsonl); cost stays null
 when the engine returned no cost envelope.
 
+Phase 6 M3.1: call() and call_stream() share one no-key guard
+(_short_circuit): with no provider key at all, or with an
+explicit pin on a provider that holds no key, NO request is
+attempted and the honest configured=False envelope is returned —
+a keyless call must never carry a user prompt to an unconfigured
+provider's default endpoint.
+
 Mock/testing: DCLAWOS_LLM_BIN overrides the CLI path and
 DCLAWOS_LLM_BASE_URL_<PROVIDER> sets a per-provider endpoint
 override, so the build gate can point the whole path at a local
@@ -350,15 +357,57 @@ def _record_usage(result, task_type, task_id, session):
         pass
 
 
+def _no_key_envelope():
+    """The honest empty envelope returned when a call is
+    short-circuited before any request: nothing was sent, nothing
+    is recorded in the usage ledger, cost stays null."""
+    return {"response": None, "provider": None, "model": None,
+            "attempts": [], "fallbackCount": 0, "costUsd": None,
+            "cost_envelope": None, "configured": False}
+
+
+def _short_circuit(keys, provider):
+    """Shared no-key short-circuit for call() / call_stream()
+    (Phase 6 M3.1). Returns the honest empty envelope when the
+    call must not be attempted at all, else None:
+
+    (a) NO provider key exists at all (the M2 test_connection
+        rule; the M3 correction applied it to call_stream), or
+    (b) the caller pinned a provider explicitly and that provider
+        holds no key — the engine pushes an explicit pin as a
+        target even keyless and would attempt the provider's
+        DEFAULT endpoint unauthenticated (the mechanism behind
+        the 2026-10-31 10:27 permission-card incident), carrying
+        the user's prompt with it.
+
+    Auto routing (no explicit pin) with at least one key present
+    proceeds to the CLI exactly as before.
+    // reuse-check: semantics ADOPTED from the M3 correction's
+      call_stream short-circuit and the M2 test_connection no-key
+      rule — one helper, one envelope, no second semantics.
+    """
+    if not keys:
+        return _no_key_envelope()
+    if provider and provider not in keys:
+        return _no_key_envelope()
+    return None
+
+
 def call(messages, tools=None, task_type=None, provider=None,
          model=None, targets=None, max_tokens=None, task_id=None,
          session=None):
     """Run one model turn through dclawos-llm. Returns the result
     dict {response, provider, model, attempts, fallbackCount,
-    costUsd, cost_envelope}. Raises ValueError on transport failure
-    (the loop records it as data; a failed call is never disguised
-    as a model reply)."""
+    costUsd, cost_envelope}. When _short_circuit fires (no keys
+    at all, or an explicit pin on a keyless provider) returns the
+    honest empty envelope with configured=False instead — no CLI
+    is spawned and no usage is recorded. Raises ValueError on
+    transport failure (the loop records it as data; a failed call
+    is never disguised as a model reply)."""
     keys = available_keys()
+    short = _short_circuit(keys, provider)
+    if short is not None:
+        return short
     request = build_request(
         messages, tools=tools, task_type=task_type,
         provider=provider, model=model, targets=targets,
@@ -409,19 +458,14 @@ def call_stream(messages, tools=None, task_type=None, provider=None,
     """
     import threading as _threading
     keys = available_keys()
-    if not keys:
-        # No-key short-circuit (the M2 test_connection rule, applied
-        # to the streaming path): with NO provider key at all, NO
-        # request is sent and no CLI is spawned — an explicit
-        # provider/model pin must never be allowed to reach a
-        # provider's default endpoint keyless (the engine would
-        # otherwise push the pin as a target and attempt it).
-        # Returns the honest empty envelope; nothing is recorded
-        # in the usage ledger because no call happened.
-        return {"response": None, "provider": None, "model": None,
-                "attempts": [], "fallbackCount": 0, "costUsd": None,
-                "cost_envelope": None, "stream_mode": "staged",
-                "configured": False}
+    short = _short_circuit(keys, provider)
+    if short is not None:
+        # No-key short-circuit (shared with call() since Phase 6
+        # M3.1; see _short_circuit): NO request is sent and no CLI
+        # is spawned, and nothing is recorded in the usage ledger
+        # because no call happened.
+        short["stream_mode"] = "staged"
+        return short
     request = build_request(
         messages, tools=tools, task_type=task_type,
         provider=provider, model=model, targets=targets,

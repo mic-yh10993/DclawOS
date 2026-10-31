@@ -537,6 +537,29 @@ local-mock override as a backstop and asserts zero attempts, so
 a regression lands on the mock and fails the gate instead of
 reaching a real endpoint.
 
+### M3.1 — same short-circuit for the non-streaming call()
+
+The pre-M3 `llmlib.call` carried the same hazard in library
+form: no no-key short-circuit, with only caller-side guards
+keeping it from ever firing. `call()` and `call_stream()` now
+share ONE helper (`llmlib._short_circuit`, one honest envelope
+with `configured: false`, empty attempts, null cost): a call is
+not attempted when (a) no provider key exists at all, or (b)
+the caller pinned a provider explicitly and that provider
+holds no key — the engine pushes an explicit pin as a target
+even keyless, so a keyless pin must never carry a user prompt
+to an unconfigured provider's default endpoint. Auto routing
+with at least one key present is unchanged, as is every keyed
+path (daemon compaction, test_connection keeps its own
+pre-check and is unaffected). Short-circuited calls spawn no
+CLI and write no usage-ledger record. Gate evidence:
+modeltest section 9 asserts the fake binary's invocation count
+and the ledger line count move by ZERO across the zero-key
+pin, zero-key auto-route and keyless-pin cases (with the local
+mock override in place as backstop), and by exactly ONE each
+for a keyed call; chattest / eventbustest / settingstest /
+agentlooptest pass unchanged.
+
 ### Named limits / not done
 
 - WebView visuals and the page's JS runtime cannot be verified

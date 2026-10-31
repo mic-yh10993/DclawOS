@@ -30,6 +30,12 @@ exercise the REAL llmlib assembly path:
    verbs are refused, and replies strip secret-looking keys.
 8. Health status: missing state dir reports no-data sections;
    corrupt files are tolerated; a valid quality file is surfaced.
+9. llmlib.call no-key short-circuit (Phase 6 M3.1): zero keys
+   (explicit pin and auto route) and a pin on a keyless provider
+   return the configured=False envelope WITHOUT spawning the
+   fake binary or writing the usage ledger; a keyed call still
+   invokes the binary exactly once and appends exactly one
+   ledger record.
 
 Exits non-zero on the first failed assertion. Invoked by build
 hook 1008 inside the image chroot; also runnable by hand.
@@ -56,6 +62,7 @@ SECRETS = os.path.join(ROOT, "secrets")
 USAGE = os.path.join(ROOT, "usage.jsonl")
 STATE = os.path.join(ROOT, "engine-state")
 CAPTURE = os.path.join(ROOT, "capture.json")
+CALL_COUNT = os.path.join(ROOT, "fake-llm-calls.txt")
 FAKE_BIN = os.path.join(ROOT, "fake-llm")
 os.makedirs(SECRETS, exist_ok=True)
 os.makedirs(STATE, exist_ok=True)
@@ -68,6 +75,7 @@ os.environ["DCLAWOS_STATE_DIR"] = STATE
 os.environ["DCLAWOS_TASKS_DIR"] = os.path.join(ROOT, "tasks")
 os.environ["DCLAWOS_EVENTS_PATH"] = os.path.join(ROOT, "events.jsonl")
 os.environ["DCLAWOS_LLM_BIN"] = FAKE_BIN
+os.environ["FAKE_COUNT"] = CALL_COUNT
 
 import bridgeprotocol  # noqa: E402
 import llmlib  # noqa: E402
@@ -132,6 +140,10 @@ MOCK_URL = f"http://127.0.0.1:{SERVER.server_address[1]}/v1/chat/completions"
 FAKE_LLM = r'''
 import json, os, sys, urllib.request, urllib.error
 capture = os.environ.get("FAKE_CAPTURE", "")
+count_path = os.environ.get("FAKE_COUNT", "")
+if count_path:
+    with open(count_path, "a", encoding="utf-8") as fh:
+        fh.write("x\n")
 raw = sys.stdin.read()
 req = json.loads(raw)
 if capture:
@@ -459,6 +471,68 @@ def main():
     if entry.get("samples") != 7:
         fail("valid quality file not surfaced")
 
+    # ---- 9. llmlib.call no-key short-circuit (Phase 6 M3.1)
+    # The fake binary counts its own invocations; the usage file
+    # is line-counted. A short-circuited call must move NEITHER.
+    def line_count(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return sum(1 for _ in handle)
+        except OSError:
+            return 0
+
+    def expect_short(result, label):
+        if result.get("configured") is not False:
+            fail(f"{label}: envelope lacks configured=False: {result}")
+        if result.get("response") is not None \
+                or result.get("attempts") != []:
+            fail(f"{label}: short-circuit fabricated a call: {result}")
+        if result.get("costUsd") is not None \
+                or result.get("cost_envelope") is not None:
+            fail(f"{label}: short-circuit invented a cost: {result}")
+
+    calls_before = line_count(CALL_COUNT)
+    usage_before = line_count(USAGE)
+    # (a) Zero keys at all: explicit pin AND auto routing both
+    # short-circuit. The local-mock base-url override for openai
+    # (set in section 2) stays in place as a backstop: a
+    # regression would land on the mock and move the counters.
+    empty_secrets = os.path.join(ROOT, "secrets-empty")
+    os.makedirs(empty_secrets, exist_ok=True)
+    os.environ["DCLAWOS_SECRETS_DIR"] = empty_secrets
+    try:
+        expect_short(llmlib.call(
+            [{"role": "user", "content": "hi"}],
+            provider="openai", model="gpt-4o-mini"),
+            "zero-key explicit pin")
+        expect_short(llmlib.call(
+            [{"role": "user", "content": "hi"}]),
+            "zero-key auto route")
+    finally:
+        os.environ["DCLAWOS_SECRETS_DIR"] = SECRETS
+    # (b) Keys exist, but the explicit pin names a provider that
+    # holds no key: same short-circuit (the engine would push the
+    # pin as a target and attempt its default endpoint keyless).
+    expect_short(llmlib.call(
+        [{"role": "user", "content": "hi"}],
+        provider="unkeyedprov", model="some-model"),
+        "pin on keyless provider")
+    if line_count(CALL_COUNT) != calls_before:
+        fail("short-circuited call spawned the dclawos-llm binary")
+    if line_count(USAGE) != usage_before:
+        fail("short-circuited call wrote a usage ledger record")
+
+    # Keyed path unchanged: exactly one CLI invocation, exactly
+    # one new ledger line, a real response from the local mock.
+    result = llmlib.call([{"role": "user", "content": "hi"}],
+                         provider="openai", model="gpt-4o-mini")
+    if not result.get("response"):
+        fail("keyed call against mock failed after M3.1")
+    if line_count(CALL_COUNT) != calls_before + 1:
+        fail("keyed call did not invoke the binary exactly once")
+    if line_count(USAGE) != usage_before + 1:
+        fail("keyed call did not append exactly one ledger record")
+
     # Engine presence cross-check when the built bundle is present
     # (in the image chroot it always is): the engine's own selftest
     # validates DEFAULT_WEIGHTS + every mode pack with the real
@@ -476,7 +550,8 @@ def main():
     print("modeltest OK: registry validation, CRUD->assembly, pin "
           "order, routing pass-through, connectivity "
           "success/failure/no-key, usage aggregation, bridge "
-          "allowlist and health tolerance verified "
+          "allowlist, health tolerance and call() no-key "
+          "short-circuit verified "
           "(local mock only, no real provider contacted)")
     return 0
 
