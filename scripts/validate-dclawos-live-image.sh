@@ -1152,7 +1152,7 @@ done
 # bins, exactly dclawos-shell (Wnck window) and dclawos-gui (Wnck
 # CLI coexistence pin) may pin Gtk 3.0 — matching UI-FUNCTIONS.
 unsquashfs -d "$WORK/m5-allbins" "$FS" usr/local/bin >/dev/null 2>&1
-gtk3_bins="$(grep -l '"Gtk", "3.0"' "$WORK/m5-allbins/usr/local/bin/"* 2>/dev/null \
+gtk3_bins="$(grep -d skip -l '"Gtk", "3.0"' "$WORK/m5-allbins/usr/local/bin/"* 2>/dev/null \
     | xargs -n1 basename 2>/dev/null | sort | tr '\n' ' ')"
 [ "$gtk3_bins" = "dclawos-gui dclawos-shell " ] || {
     echo "M5: Gtk 3.0 exception set drifted: $gtk3_bins" >&2; exit 1; }

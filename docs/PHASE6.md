@@ -929,3 +929,20 @@ branch returns True.
 - dclawos-takeover's 1 s poll remains: converting it to bus
   push is a behaviour change outside M5's migration mandate
   and is recorded in UI-FUNCTIONS rather than silently kept.
+
+### M5 gate fix (run #57 failure, for the record)
+
+Run 41167828374 (#57) built the ISO successfully (all hooks,
+including the 1008 suites inside the Bookworm chroot with the
+new GTK4/WebKit6 packages, passed) but the Verify step failed
+at validate line 1156 with exit 2 and no assertion message:
+the M5 block's own `grep -l ... usr/local/bin/*` hit the
+`__pycache__` DIRECTORY in the extracted bin dir; grep exits 2
+on that error even when matches are found, and `pipefail`
+turned the command-substitution assignment into a fatal
+failure before the comparison could print anything. Gate-side
+bug in the new M5 assertion itself (verify-the-gate-first:
+the per-window pins and every earlier M5 assertion had already
+passed against the real ISO); product code unchanged. Fix:
+`grep -d skip` so directories in the glob are skipped, in this
+follow-up commit — the P4-M4 gate-fix precedent.
