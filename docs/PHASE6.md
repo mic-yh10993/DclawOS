@@ -518,6 +518,25 @@ docs/BRIDGE-PROTOCOL.md, called by the page last.
   same race exists on the base commit; agentlooptest needs the
   image layout under /usr/local, provided locally via symlinks).
 
+### Correction (2026-10-31, post-M3 incident)
+
+The first version of chattest's no-key section called
+`llmlib.call_stream` with an explicit provider/model pin and NO
+base-url override, asserting only that the LOCAL mock saw no
+hit. That assertion was blind: `call_stream` had no no-key
+short-circuit, and the engine pushes an explicit pin as a target
+even keyless, so the call attempted the provider's DEFAULT
+endpoint unauthenticated (this triggered a Muse permission
+card at 10:27 CST; the full accounting is in the M3 worker's
+report to the coordinator). Fixes, in this follow-up commit:
+`llmlib.call_stream` now short-circuits before spawning the CLI
+when NO provider key exists at all (the M2 `test_connection`
+rule; honest empty envelope with `configured: false`, nothing
+sent, nothing recorded), and the chattest section sets the
+local-mock override as a backstop and asserts zero attempts, so
+a regression lands on the mock and fails the gate instead of
+reaching a real endpoint.
+
 ### Named limits / not done
 
 - WebView visuals and the page's JS runtime cannot be verified

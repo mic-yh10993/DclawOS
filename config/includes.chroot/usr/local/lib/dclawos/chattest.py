@@ -246,15 +246,22 @@ def main():
     if not os.path.isfile("/usr/share/dclawos/engine/llm.js"):
         fail("engine bundle missing (hook 1003 must build llm.js)")
 
-    # (b2) No keys: llmlib sends nothing, returns an honest null.
+    # (b2) No keys: llmlib.call_stream short-circuits BEFORE any
+    # request (no CLI spawned), returning an honest null. The
+    # base-url override to the LOCAL mock is set as a backstop:
+    # if the short-circuit ever regressed, the attempt would land
+    # on the local mock and the hit-count assertion would fail —
+    # it must never reach a provider default endpoint.
+    os.environ["DCLAWOS_LLM_BASE_URL_OPENAI"] = SSE_URL
     hits_before = len(HITS)
     result = llmlib.call_stream(
         [{"role": "user", "content": "hi"}],
         provider="openai", model="gpt-4o-mini")
+    os.environ.pop("DCLAWOS_LLM_BASE_URL_OPENAI", None)
     if result.get("response") is not None:
         fail("no-key call fabricated a response")
-    # (the decision path with zero keys produces no targets; and
-    # even the engine must not have been asked to hit the mock)
+    if result.get("attempts"):
+        fail("no-key call recorded attempts (short-circuit missing)")
     if len(HITS) != hits_before:
         fail("no-key call sent a request to the mock")
 

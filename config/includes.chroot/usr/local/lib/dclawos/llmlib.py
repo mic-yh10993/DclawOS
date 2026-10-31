@@ -409,6 +409,19 @@ def call_stream(messages, tools=None, task_type=None, provider=None,
     """
     import threading as _threading
     keys = available_keys()
+    if not keys:
+        # No-key short-circuit (the M2 test_connection rule, applied
+        # to the streaming path): with NO provider key at all, NO
+        # request is sent and no CLI is spawned — an explicit
+        # provider/model pin must never be allowed to reach a
+        # provider's default endpoint keyless (the engine would
+        # otherwise push the pin as a target and attempt it).
+        # Returns the honest empty envelope; nothing is recorded
+        # in the usage ledger because no call happened.
+        return {"response": None, "provider": None, "model": None,
+                "attempts": [], "fallbackCount": 0, "costUsd": None,
+                "cost_envelope": None, "stream_mode": "staged",
+                "configured": False}
     request = build_request(
         messages, tools=tools, task_type=task_type,
         provider=provider, model=model, targets=targets,
