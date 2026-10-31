@@ -266,21 +266,30 @@ def _settings_get(params):
     return {"key": key, "value": settingslib.get_setting(key)}
 
 
-def _settings_set(params, task):
-    import settingslib
+def _settings_set(params, task, ticket_id):
+    """Execute settings_set in the root broker (P5-M7 hardening).
+
+    The daemon never writes the settings file itself — as
+    dclaw-agent it only has READ access to it (0640 in a 0710
+    directory), which is deliberate: its shell tool must not be
+    able to edit settings around the library. The broker's
+    set-setting op re-checks the human-only denylist in root code,
+    validates, writes, and logs the change event; the broker
+    params are exactly the ticketed {key, value}.
+    """
     key = params.get("key")
     if not isinstance(key, str) or not key:
         raise ValueError("settings_set needs a 'key'")
     if "value" not in params:
         raise ValueError("settings_set needs a 'value'")
-    # agent=True: the lib re-checks the human-only denylist (the
-    # execute_step pre-check is the first line, this is the second).
-    old = settingslib.set_setting(key, params["value"], agent=True)
-    new = settingslib.get_setting(key)
+    result = _broker_tool(ticket_id, "set-setting",
+                          {"key": key, "value": params["value"]})
     agentlib.log_event(
-        "settings", f"settings_set {key}: {old!r} -> {new!r}",
+        "settings",
+        f"settings_set {key} applied via broker "
+        f"(ticket {ticket_id})",
         session=task.get("session", ""))
-    return {"key": key, "old": old, "new": new}
+    return result
 
 
 def _takeover_request(params):
@@ -377,7 +386,20 @@ def execute_step(task, step):
     ticket_id = None
     if tier > 0:
         summary = f"{tool} {json.dumps(params, ensure_ascii=False)[:200]}"
-        verdict, ticket_id = agentlib.request_approval(tool, params, summary)
+        if tool == "settings_set":
+            # The settings write executes in the root broker
+            # (P5-M7 hardening): the ticket must therefore carry
+            # the BROKER operation name and exactly the broker
+            # params {key, value} — the ticket's params hash binds
+            # execution to what the human approved (the same shape
+            # as the write-secret flow in dclawos-secret).
+            broker_params = {"key": params.get("key"),
+                             "value": params.get("value")}
+            verdict, ticket_id = agentlib.request_approval(
+                "set-setting", broker_params, summary)
+        else:
+            verdict, ticket_id = agentlib.request_approval(
+                tool, params, summary)
         if verdict != "approved":
             raise ValueError(f"approval {verdict} for {tool} ({reason})")
     if tool == "shell":
@@ -436,7 +458,7 @@ def execute_step(task, step):
     if tool == "settings_get":
         return _settings_get(params)
     if tool == "settings_set":
-        return _settings_set(params, task)
+        return _settings_set(params, task, ticket_id)
     if tool == "subagent":
         return _subagent(params, task)
     if tool == "cron":

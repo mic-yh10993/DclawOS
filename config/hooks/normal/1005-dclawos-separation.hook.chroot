@@ -42,6 +42,18 @@ mkdir -p /var/lib/dclawos
 chown dclaw:dclawos-session /var/lib/dclawos
 chmod 0770 /var/lib/dclawos
 
+# Settings store directory (Phase 5 M7 hardening, external review
+# P0 item 2): the shared settings file lives in its OWN directory,
+# owned by the human, group-traversable only (0710). The agent can
+# traverse + read the file (0640) but cannot create, unlink or
+# rename anything here — placing the file directly in the
+# group-writable exchange dir above would let the agent replace
+# it wholesale despite the file mode. Agent settings WRITES go
+# through the root broker's set-setting op, never the file.
+mkdir -p /var/lib/dclawos/settings
+chown dclaw:dclawos-session /var/lib/dclawos/settings
+chmod 0710 /var/lib/dclawos/settings
+
 # Guards: the AI user must have no sudo path, ever.
 if id -nG dclaw-agent | tr ' ' '\n' | grep -qx 'sudo'; then
     echo "dclawos-separation: dclaw-agent must not be in sudo" >&2

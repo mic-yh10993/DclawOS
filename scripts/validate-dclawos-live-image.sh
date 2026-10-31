@@ -304,8 +304,18 @@ grep -q 'AGENT_DENIED_KEYS' "$WORK/settingslib-extract/usr/local/lib/dclawos/set
     echo "settingslib lacks the agent denylist" >&2
     exit 1
 }
-grep -q 'agent-settings.json' "$WORK/settingslib-extract/usr/local/lib/dclawos/settingslib.py" || {
-    echo "settingslib lacks the shared settings path" >&2
+grep -q 'settings/agent-settings.json' "$WORK/settingslib-extract/usr/local/lib/dclawos/settingslib.py" || {
+    echo "settingslib lacks the hardened shared settings path" >&2
+    exit 1
+}
+# (broker already extracted to $WORK/dclawos-privileged-extract by
+# the Phase 2 module 5 block above; reuse it.)
+grep -q 'set-setting' "$WORK/dclawos-privileged-extract/usr/local/bin/dclawos-privileged" || {
+    echo "privilege broker lacks the set-setting operation" >&2
+    exit 1
+}
+grep -q 'agent_denied' "$WORK/dclawos-privileged-extract/usr/local/bin/dclawos-privileged" || {
+    echo "privilege broker does not enforce the settings denylist" >&2
     exit 1
 }
 grep -q 'settingslib' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {

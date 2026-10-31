@@ -147,17 +147,49 @@ config file both sides read). The broker set-setting option (A)
 was NOT taken. This closes the W2.4 settings_set BLOCKED-NAMED row.
 
 **What landed** (`settingslib.py`, single implementation, both
-sides): the store is `/var/lib/dclawos/agent-settings.json`
-(group `dclawos-session`, 0660, flock + per-key read-modify-write
-+ atomic rename — the registry/tasks sharing pattern). The path
-and the `chaos-enabled` key predate the module: the engine's
-qualityStore chaos gate already read exactly this file, so the
-chaos consumer migrated with zero engine changes. Key inventory
-(= KEY_SPECS): the seven org.dclawos.settings schema keys +
-chaos-enabled, all type/enum-validated; unknown keys rejected on
-write, wrong-typed stored values fall back per-key, a corrupt
-file falls back to all defaults (logged; next write sets it
-aside as `.corrupt`) — no reader ever crashes.
+sides READ it): the store is
+`/var/lib/dclawos/settings/agent-settings.json` (flock + per-key
+read-modify-write + atomic rename — the registry/tasks sharing
+pattern). The file name and the `chaos-enabled` key predate the
+module: the engine's qualityStore chaos gate already read an
+agent-settings.json, so the chaos consumer migrated by moving
+its default path along. Key inventory (= KEY_SPECS): the seven
+org.dclawos.settings schema keys + chaos-enabled, all
+type/enum-validated; unknown keys rejected on write, wrong-typed
+stored values fall back per-key, a corrupt file falls back to
+all defaults (logged; next write sets it aside as `.corrupt`) —
+no reader ever crashes.
+
+**Write-path hardening (external security review 2026-10-31,
+P0 item 2 — credited, and the reason for this shape)**: the
+first cut of this module made the file group-writable (0660)
+with the denylist checked in library code — and the review
+correctly called that a P0 hole: the agent's tier-1 shell tool
+could edit the JSON directly and set agent-full-access=true,
+after which everything auto-approves. Fixed properly:
+- The file is owned by the human (dclaw), mode 0640, group
+  dclawos-session read-only for the agent; it lives in its own
+  directory (dclaw:dclawos-session, 0710 — traverse only), NOT
+  directly in the group-writable exchange dir, so the agent
+  cannot unlink/replace it either. Hook 1005 creates the dir.
+- The GUI (owner) writes directly via the lib (apply_setting).
+- The agent NEVER writes the file: settings_set executes in the
+  root broker via the new `set-setting` op (ticket operation
+  name + exact {key, value} params, the write-secret ticket
+  shape). The BROKER enforces AGENT_DENIED_KEYS in root code,
+  validates via KEY_SPECS, writes via apply_setting (ownership
+  restamped to dclaw, so a broker write never locks the human
+  out) and logs the change event. The lib keeps its denylist
+  check as defense in depth; the boundary is permissions +
+  broker, not library code.
+- Gate: settingstest replays the attack as dclaw-agent in the
+  chroot (direct write of an ordinary key AND of
+  agent-full-access, plus unlink via the directory — all must
+  fail), unit-tests the broker op's denylist, and asserts file
+  owner/mode before and after a broker write. The live
+  socket/ticket round trip is the pre-existing broker machinery
+  (shared by all ops) and is not exercised in a build chroot —
+  stated plainly.
 
 **Migration**: on first run the settings GUI seeds the file from
 the human's current GSettings values (defaults where untouched);
@@ -172,16 +204,19 @@ bug the audit implied: the daemon's gsettings reads saw
 dclaw-agent's own dconf (always defaults), so the GUI's
 full-access toggle and AI choices never reached the daemon.
 
-**Tools**: settings_get (tier 0) / settings_set (tier 2) wired
-through toolslib + agentlib.TOOLS/classify + daemon dispatch.
+**Tools**: settings_get (tier 0, direct file read) /
+settings_set (tier 2) wired through toolslib +
+agentlib.TOOLS/classify + daemon dispatch, with the write
+executed by the broker as above.
 **Denylist (hard boundary)**: `agent-full-access` and
 `chaos-enabled` are human-only — refused in execute_step BEFORE
 any ticket exists (so full-access auto-approval cannot reach
-them), re-checked in the lib (agent=True), attempts logged to
-the event stream; successful sets log key + old→new. (Approval
-tiers are not settings — they are hardcoded in classify, so no
-tier-policy key exists to deny. Secrets are not settings either:
-tokens stay in the broker's 0600 files.)
+them), refused again in the broker's root code, attempts logged
+to the event stream; successful sets log key + old→new (written
+by the broker). (Approval tiers are not settings — they are
+hardcoded in classify, so no tier-policy key exists to deny.
+Secrets are not settings either: tokens stay in the broker's
+0600 files.)
 
 **Exceptions (named)**: none for keys — all eight keys live in
 the shared file. The GSettings schema is retained solely as the
@@ -190,8 +225,7 @@ KEY (both sides re-read before writing one key), documented in
 settingslib.
 
 **Gate**: hook 1008 runs settingstest.py — lib round trips,
-denylist, validation, corrupt fallback, daemon dispatch fns, and
-a required two-user simulation (dclaw-agent writes → dclaw
-reads/writes back → unrelated user `nobody` cannot open the
-file). Validate script asserts the lib, the denylist and the
-GUI/daemon wiring statically.
+denylist, validation, corrupt fallback, daemon read fns, the
+broker op unit tests, and the required attack simulation above.
+Validate script asserts the lib, the denylist, the broker op and
+the GUI/daemon wiring statically.

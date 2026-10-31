@@ -13,19 +13,41 @@ the daemon (a silent no-op, the exact "fake implementation" the
 Phase 5 WS2 audit flagged for settings_set). The fix is one store
 both sides share:
 
-File: /var/lib/dclawos/agent-settings.json (env override
+File: /var/lib/dclawos/settings/agent-settings.json (env override
 DCLAWOS_SETTINGS_FILE, the same override the engine's chaos gate
-already honours), group dclawos-session, mode 0660 — the same
-sharing pattern as agent-registry.json (registrylib) and the task
-exchange (agentlib). /var/lib/dclawos itself is 0770
-dclaw:dclawos-session (hook 1005), so only the human user and
-dclaw-agent can reach the file.
+already honours).
 
-Precedent (step 0 retrieval): the file path and the chaos-enabled
-key predate this module — the routing engine's qualityStore.ts
-chaosEnabled() has read /var/lib/dclawos/agent-settings.json since
-Phase 4; nobody wrote it. This library adopts that path and key,
-so the chaos gate migrates with zero engine changes.
+WRITE-PATH HARDENING (external security review 2026-10-31, P0
+item 2 — the review is right, and this is the fix): the first cut
+made the file group-writable (0660) and relied on the
+AGENT_DENIED_KEYS check in this library — worthless against the
+agent's own shell tool, which could edit the JSON directly and
+set agent-full-access=true. Now:
+- The file is owned by the human user (dclaw), mode 0640, group
+  dclawos-session: the agent can READ it, never write it.
+- It lives in its own subdirectory (dclaw:dclawos-session, 0710:
+  group may traverse, not list/create/unlink). The parent
+  /var/lib/dclawos is group-writable by design (tasks/events
+  exchange), so a file placed directly inside could be unlinked
+  and replaced by the agent despite 0640 — the subdirectory
+  closes that rename path. Hook 1005 creates the directory.
+- The GUI writes directly (it runs as the owner).
+- The AGENT never writes the file: settings_set goes through the
+  privileged broker's set-setting operation (root code), which
+  enforces the denylist in trusted code, validates, performs the
+  write via apply_setting() below and logs the event. The
+  denylist in this library remains as defense in depth only —
+  the enforcement points are the file permissions + the broker.
+- Every write re-chowns the file to the canonical owner (dclaw)
+  before the atomic rename, so a root (broker) write never
+  locks the human out of their own settings file.
+
+Precedent (step 0 retrieval): the settings file name and the
+chaos-enabled key predate this module — the routing engine's
+qualityStore.ts chaosEnabled() has read an agent-settings.json
+under DCLAWOS_SETTINGS_FILE since Phase 4; nobody wrote it. This
+library adopts that file (moved into the settings/ subdirectory
+for the hardening above; the engine default path moved with it).
 
 Contract:
 - KEY_SPECS is the single key inventory: the seven keys of the
@@ -39,17 +61,19 @@ Contract:
   next write renames the corrupt file to <path>.corrupt once
   (best effort) before writing a clean one.
 - Writes are per-key read-modify-write under an flock on
-  <path>.lock, then atomic (tmp + rename, 0660, shared group):
+  <path>.lock, then atomic (tmp + rename, 0640, canonical owner):
   the GUI and the daemon cannot tear each other's updates, and
   neither side blind-overwrites the whole file.
-- AGENT_DENIED_KEYS is the hard security boundary for the
-  settings_set tool: keys the agent may never set, at any tier,
-  even with full access on — it governs the agent's own
-  permission grant and its own fault-injection switch. (The
-  approval tiers themselves are NOT settings: they are hardcoded
-  in agentlib.classify, so there is no tier-policy key to deny.)
-  Tokens/secrets are never settings: they stay in the broker's
-  0600 secret files by design and must never be added here.
+- AGENT_DENIED_KEYS lists the keys the agent may never set, at
+  any tier, even with full access on — its own permission grant
+  and its own fault-injection switch. ENFORCEMENT lives in the
+  broker's set-setting op (root) + the file permissions above;
+  the copy here is defense in depth and the shared definition
+  the broker imports. (The approval tiers themselves are NOT
+  settings: they are hardcoded in agentlib.classify, so there is
+  no tier-policy key to deny.) Tokens/secrets are never settings:
+  they stay in the broker's 0600 secret files by design and must
+  never be added here.
 
 GSettings after the migration: the schema stays compiled (hook
 1002) ONLY as the first-run seed source — when the shared file
@@ -57,7 +81,7 @@ is absent, the settings GUI seeds it from the human's current
 GSettings values (seed()), after which the file is authoritative
 and GSettings is no longer read or written by any DclawOS app.
 // reuse-check: agentlib.atomic_write / registrylib._atomic_write
-  pattern adopted (tmp+rename, group chown, 0660) rather than
+  pattern adopted (tmp+rename, owner/group chown, mode) rather than
   imported, reason: registrylib already duplicates the same ~10
   lines for the same reason — these libs must stay importable
   standalone (no local imports) in headless gates.
@@ -67,11 +91,15 @@ import fcntl
 import grp
 import json
 import os
+import pwd
 import sys
 import time
 
-SETTINGS_DEFAULT = "/var/lib/dclawos/agent-settings.json"
+SETTINGS_DEFAULT = "/var/lib/dclawos/settings/agent-settings.json"
 SHARED_GROUP_DEFAULT = "dclawos-session"
+SETTINGS_OWNER_DEFAULT = "dclaw"
+FILE_MODE = 0o640
+DIR_MODE = 0o710
 MAX_STRING = 512
 
 # key -> (kind, default, choices-or-None)
@@ -116,16 +144,54 @@ def _set_shared_group(path):
         pass
 
 
+def _set_canonical_owner(path):
+    """Chown to the settings owner (dclaw) + shared group, best
+    effort: a root (broker) write must leave the file owned by the
+    human, or the GUI could no longer write its own settings. A
+    non-root writer can only chown to itself/groups it belongs to,
+    which is exactly the same target."""
+    try:
+        uid = pwd.getpwnam(os.environ.get(
+            "DCLAWOS_SETTINGS_OWNER", SETTINGS_OWNER_DEFAULT)).pw_uid
+    except KeyError:
+        uid = -1
+    try:
+        gid = grp.getgrnam(_shared_group()).gr_gid
+    except KeyError:
+        gid = -1
+    if uid == -1 and gid == -1:
+        return
+    try:
+        os.chown(path, uid, gid)
+    except OSError:
+        pass
+
+
 def _atomic_write(path, text):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as handle:
         handle.write(text)
-    _set_shared_group(tmp)
+    _set_canonical_owner(tmp)
     try:
-        os.chmod(tmp, 0o660)
+        os.chmod(tmp, FILE_MODE)
     except OSError:
         pass
     os.replace(tmp, path)
+
+
+def _ensure_parent():
+    """Create the settings directory if needed and restamp its
+    hardened mode/group (hook 1005 creates it at build time; this
+    is the runtime safety net, owner/root only in effect)."""
+    parent = os.path.dirname(settings_path())
+    if not parent:
+        return
+    os.makedirs(parent, exist_ok=True)
+    _set_canonical_owner(parent)
+    try:
+        os.chmod(parent, DIR_MODE)
+    except OSError:
+        pass
 
 
 class _FileLock:
@@ -268,29 +334,45 @@ def _write_merged_locked(key, value):
                 pass
     old = current[key]
     current[key] = value
-    path = settings_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    _atomic_write(path, json.dumps(current, indent=2, sort_keys=True)
-                  + "\n")
+    _ensure_parent()
+    _atomic_write(settings_path(),
+                  json.dumps(current, indent=2, sort_keys=True) + "\n")
     return old
 
 
-def set_setting(key, value, agent=False):
-    """Validate and persist one key. Returns the previous value.
-
-    agent=True enforces AGENT_DENIED_KEYS (fail closed) — the
-    daemon's settings_set passes agent=True; the human GUI does
-    not. Raises ValueError on unknown key / bad value / denied key.
+def apply_setting(key, value):
+    """Validate and persist one key (locked read-modify-write).
+    Returns the previous value. This is the DIRECT write path: the
+    human GUI (file owner) and the root broker's set-setting op
+    call it. The broker performs its own denylist check first;
+    this function deliberately does not re-check it (root code is
+    the enforcement point and the GUI must be able to set the
+    human-only keys). Raises ValueError on unknown key/bad value.
     """
     value = validate_value(key, value)
-    if agent and agent_denied(key):
-        raise ValueError(
-            f"{key} is human-only: the agent may never set it "
-            f"(denied even with full access)")
     with _FileLock(settings_path()):
         return _write_merged_locked(key, value)
+
+
+def set_setting(key, value, agent=False):
+    """Human-path wrapper over apply_setting.
+
+    agent=True is NOT a write path: since the P0-2 hardening the
+    agent's settings_set is executed by the root broker, so an
+    agent-side caller reaching this function is refused — denied
+    keys with the denylist message (defense in depth), other keys
+    with a pointer to the broker op. Raises ValueError.
+    """
+    value = validate_value(key, value)
+    if agent:
+        if agent_denied(key):
+            raise ValueError(
+                f"{key} is human-only: the agent may never set it "
+                f"(denied even with full access)")
+        raise ValueError(
+            "agent settings writes must go through the privileged "
+            "broker 'set-setting' operation, not the shared library")
+    return apply_setting(key, value)
 
 
 def seed(seed_values):
@@ -311,10 +393,8 @@ def seed(seed_values):
             return False
         merged = dict(DEFAULTS)
         merged.update(clean)
-        path = settings_path()
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        _atomic_write(path, json.dumps(merged, indent=2,
-                                       sort_keys=True) + "\n")
+        _ensure_parent()
+        _atomic_write(settings_path(),
+                      json.dumps(merged, indent=2, sort_keys=True)
+                      + "\n")
         return True

@@ -9,7 +9,7 @@ requirement, cards §3).
 
 P5-M7 (user decision 2026-10-31, option B: "设置改存双方共读的配置
 文件"): the store is the SHARED settings file
-(/var/lib/dclawos/agent-settings.json) via settingslib — the same
+(/var/lib/dclawos/settings/agent-settings.json) via settingslib — the same
 file the agent daemon reads, so what the human sets here is what
 the agent sees (GSettings is per-user dconf; the daemon could
 never see this app's writes). The org.dclawos.settings schema

@@ -23,6 +23,14 @@ with the approval GUI):
 - write-secret (Phase 3 M1): write a named secret to
   /var/lib/dclawos/secrets/<name>, owner root, mode 0600; the
   agent reads only its own named files back at runtime.
+- set-setting (Phase 5 M7 hardening, external review P0 item 2):
+  write ONE key of the shared settings file
+  (/var/lib/dclawos/settings/agent-settings.json). The file is
+  owned by the human user and READ-only for the agent (0640 +
+  a 0710 directory), so this op is the agent's ONLY write path
+  to settings; the human-only denylist (agent-full-access,
+  chaos-enabled) is enforced HERE, in root code — not only in
+  the shared library the agent could bypass with its shell tool.
 Everything else (system config writes, arbitrary commands) is
 refused. The broker logs ticket id + operation + outcome only —
 never params contents and never ticket file contents.
@@ -214,12 +222,56 @@ def op_write_secret(params):
     return True, {"name": name, "stored": True}
 
 
+def op_set_setting(params):
+    """Write one shared-settings key (Phase 5 M7 hardening).
+
+    The trusted enforcement point for the agent's settings_set
+    tool: the ticket binds operation + exact {key, value} params
+    (validate_for_execution), and the human-only denylist is
+    checked here, in root code, before any write — the agent
+    cannot reach the file directly (0640, owner dclaw, in a 0710
+    directory) and cannot talk the broker into a denied key.
+    Validation is settingslib's KEY_SPECS (one schema, both
+    sides); the write is settingslib.apply_setting (locked
+    read-modify-write, ownership restamped to the human owner).
+    The change is recorded in the shared event stream — settings
+    values are non-secret config by design (secrets never live
+    in settings; see settingslib).
+    """
+    import settingslib
+    key = params.get("key")
+    if not isinstance(key, str) or not key:
+        return False, "set-setting needs a string 'key' param"
+    if "value" not in params:
+        return False, "set-setting needs a 'value' param"
+    if settingslib.agent_denied(key):
+        return False, (
+            f"set-setting refused: {key!r} is human-only; the "
+            f"agent may never set it (broker-enforced denylist)")
+    try:
+        old = settingslib.apply_setting(key, params["value"])
+        new = settingslib.get_setting(key)
+    except ValueError as exc:
+        return False, f"set-setting refused: {exc}"
+    except OSError as exc:
+        return False, f"set-setting failed: {exc}"
+    try:
+        import agentlib
+        agentlib.log_event(
+            "settings",
+            f"settings_set {key}: {old!r} -> {new!r} (via broker)")
+    except Exception:  # noqa: BLE001 - audit best effort, op stands
+        log("set-setting: event log write failed (op still applied)")
+    return True, {"key": key, "old": old, "new": new}
+
+
 OPERATIONS = {
     "read-file": op_read_file,
     "service-status": op_service_status,
     "restart-service": op_restart_service,
     "package-install": op_package_install,
     "write-secret": op_write_secret,
+    "set-setting": op_set_setting,
 }
 
 

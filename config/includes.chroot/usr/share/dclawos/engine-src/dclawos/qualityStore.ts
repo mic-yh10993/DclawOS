@@ -128,7 +128,7 @@ export function chaosEnabled(): boolean {
     const settings = JSON.parse(
       readFileSync(
         process.env.DCLAWOS_SETTINGS_FILE ||
-          "/var/lib/dclawos/agent-settings.json",
+          "/var/lib/dclawos/settings/agent-settings.json",
         "utf8",
       ),
     );
