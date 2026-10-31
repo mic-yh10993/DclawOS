@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Shared DclawOS GUI theme (Phase 3 module 7; Phase 5 module 5).
+"""Shared DclawOS GUI theme (Phase 3 module 7; Phase 5 module 5;
+Phase 6 M5: dual-generation — GTK4 apps get theme-gtk4.css via
+add_provider_for_display, the GTK3 taskbar keeps theme.css;
+helpers branch on the loaded Gtk major version).
 
 One small module every DclawOS GTK window app imports: it loads
 the shared stylesheet (/usr/share/dclawos/theme.css) through a
@@ -41,6 +44,11 @@ import os
 
 CSS_PATH = "/usr/share/dclawos/theme.css"
 DARK_CSS_PATH = "/usr/share/dclawos/theme-dark.css"
+# Phase 6 M5: GTK4 processes use the GTK4 sheets (same tokens,
+# GTK4 node names); GTK3 processes (the Wnck taskbar exception)
+# keep the sheets above. Token parity is gate-asserted.
+CSS_PATH_GTK4 = "/usr/share/dclawos/theme-gtk4.css"
+DARK_CSS_PATH_GTK4 = "/usr/share/dclawos/theme-gtk4-dark.css"
 DARK_KEY = "ui-dark"  # shared settings file key (settingslib)
 
 # Embedded copies of theme.css / theme-dark.css (kept in sync by
@@ -271,15 +279,46 @@ def _dark_preferred():
         return os.environ.get("DCLAWOS_UI_DARK") == "1"
 
 
-def apply_theme():
-    """Apply the shared stylesheet to this process. Returns bool."""
+def _gtk_major():
+    """Major version of the Gtk this process already loaded (the
+    app chooses it via gi.require_version before importing us);
+    None when Gtk is unavailable."""
     try:
-        import gi
-        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        return Gtk.get_major_version()
+    except Exception:
+        return None
+
+
+def apply_theme():
+    """Apply the shared stylesheet to this process. Returns bool.
+
+    Phase 6 M5: dual-generation. A GTK4 process gets the GTK4
+    sheets via StyleContext.add_provider_for_display; a GTK3
+    process (dclawos-shell, the Wnck exception) keeps the GTK3
+    sheets via add_provider_for_screen. No require_version is
+    pinned here: the app process has already chosen its Gtk.
+    """
+    try:
         from gi.repository import Gtk, Gdk
     except Exception:
         return False
     try:
+        major = Gtk.get_major_version()
+        if major == 4:
+            css = _read_css(CSS_PATH_GTK4, FALLBACK_CSS)
+            if _dark_preferred():
+                css = css + b"\n" + _read_css(
+                    DARK_CSS_PATH_GTK4, FALLBACK_DARK_CSS)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css, -1)
+            display = Gdk.Display.get_default()
+            if display is None:
+                return False
+            Gtk.StyleContext.add_provider_for_display(
+                display, provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            return True
         css = _read_css(CSS_PATH, FALLBACK_CSS)
         if _dark_preferred():
             css = css + b"\n" + _read_css(DARK_CSS_PATH,
@@ -321,8 +360,6 @@ def inline_icon(image, pixel_size=16):
     """Rule 5: inline icon alignment (GTK has no vertical-align;
     box-centering at a fixed pixel size is the equivalent)."""
     try:
-        import gi
-        gi.require_version("Gtk", "3.0")
         from gi.repository import Gtk
         image.set_pixel_size(pixel_size)
         image.set_valign(Gtk.Align.CENTER)
@@ -335,12 +372,14 @@ def inline_icon(image, pixel_size=16):
 def apply_prose(label, chars=68):
     """Rule 8 (approximation): wrap + capped line length."""
     try:
-        import gi
-        gi.require_version("Gtk", "3.0")
-        gi.require_version("Pango", "1.0")
         from gi.repository import Gtk, Pango
-        label.set_line_wrap(True)
-        label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if Gtk.get_major_version() == 4:
+            # GTK4 renamed the Label wrap properties.
+            label.set_wrap(True)
+            label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        else:
+            label.set_line_wrap(True)
+            label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
         label.set_max_width_chars(chars)
         return True
     except Exception:
@@ -353,21 +392,18 @@ def make_section(title, content, expanded=True):
     the height; callers never measure or set pixel heights.
     Returns the container widget to pack."""
     try:
-        import gi
-        gi.require_version("Gtk", "3.0")
         from gi.repository import Gtk
     except Exception:
         return content
     try:
+        gtk4 = Gtk.get_major_version() == 4
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         revealer = Gtk.Revealer()
         revealer.set_transition_type(
             Gtk.RevealerTransitionType.SLIDE_DOWN)
         revealer.set_transition_duration(250)
         revealer.set_reveal_child(expanded)
-        revealer.add(content)
         header = Gtk.Button(label=("▾ " if expanded else "▸ ") + title)
-        header.set_relief(Gtk.ReliefStyle.NONE)
         header.set_halign(Gtk.Align.START)
 
         def _toggle(_button):
@@ -376,8 +412,19 @@ def make_section(title, content, expanded=True):
             header.set_label(("▾ " if now else "▸ ") + title)
 
         header.connect("clicked", _toggle)
-        box.pack_start(header, False, False, 0)
-        box.pack_start(revealer, True, True, 0)
+        if gtk4:
+            # GTK4: set_child/append; ReliefStyle is gone, the
+            # "flat" style class is its replacement.
+            revealer.set_child(content)
+            header.add_css_class("flat")
+            revealer.set_vexpand(True)
+            box.append(header)
+            box.append(revealer)
+        else:
+            revealer.add(content)
+            header.set_relief(Gtk.ReliefStyle.NONE)
+            box.pack_start(header, False, False, 0)
+            box.pack_start(revealer, True, True, 0)
         return box
     except Exception:
         return content
@@ -443,8 +490,6 @@ def stream_reveal(text_view, text, scroll_cb=None):
     Falls back to an instant insert on any problem."""
     try:
         GLib = _glib()
-        import gi
-        gi.require_version("Gdk", "3.0")
         from gi.repository import Gdk
     except Exception:
         try:
@@ -480,6 +525,11 @@ def stream_reveal(text_view, text, scroll_cb=None):
                     continue
                 start_iter = buffer.get_iter_at_offset(start)
                 end_iter = buffer.get_iter_at_offset(end)
+                # GTK4 returns (success, iter) tuples here.
+                if isinstance(start_iter, tuple):
+                    start_iter = start_iter[1]
+                if isinstance(end_iter, tuple):
+                    end_iter = end_iter[1]
                 if step == 0:
                     buffer.remove_tag(tags[0], start_iter, end_iter)
                     buffer.apply_tag(tags[1], start_iter, end_iter)
@@ -501,6 +551,10 @@ def stream_reveal(text_view, text, scroll_cb=None):
             end_offset = buffer.get_char_count()
             start_iter = buffer.get_iter_at_offset(start_offset)
             end_iter = buffer.get_iter_at_offset(end_offset)
+            if isinstance(start_iter, tuple):
+                start_iter = start_iter[1]
+            if isinstance(end_iter, tuple):
+                end_iter = end_iter[1]
             buffer.apply_tag(tags[0], start_iter, end_iter)
             state["spans"].append([start_offset, end_offset, 0])
             state["pos"] += per_tick

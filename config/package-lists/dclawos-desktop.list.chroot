@@ -17,11 +17,24 @@ python3-gi
 python3-websocket
 gir1.2-gtk-3.0
 gir1.2-wnck-3.0
-# Phase 6 M2: WebKitGTK 4.1 for the settings model WebView page
-# (Debian Bookworm package: gir1.2-webkit2-4.1, API 4.1 / libsoup3;
-# pulls libwebkit2gtk-4.1-0 as a dependency).
-gir1.2-webkit2-4.1
-gir1.2-gtksource-4
+# Phase 6 M5: GTK4 + libadwaita for the migrated windows
+# (Debian Bookworm, verified on packages.debian.org/bookworm:
+# gir1.2-gtk-4.0 4.8.3, gir1.2-adw-1 1.2.2 / libadwaita-1-0).
+# The GTK3 typelibs above stay ONLY for the Wnck taskbar
+# exception and dclawos-gui (docs/UI-FUNCTIONS.md).
+gir1.2-gtk-4.0
+gir1.2-adw-1
+libadwaita-1-0
+# Phase 6 M5: WebKitGTK 6.0 (GTK4) for the three WebView hosts
+# (settings model page / chat / dashboard). Bookworm-verified:
+# gir1.2-webkit-6.0 exists in bookworm (2.50.6-1~deb12u2 via
+# bookworm-security; pulls libwebkitgtk-6.0-4). It REPLACES the
+# M2-era gir1.2-webkit2-4.1 (GTK3) — the hosts are GTK4 now.
+gir1.2-webkit-6.0
+# Phase 6 M5: GtkSourceView 5 is the GTK4 generation of the
+# editor's widget (Bookworm gir1.2-gtksource-5, 5.6.x); it
+# replaces gir1.2-gtksource-4.
+gir1.2-gtksource-5
 libglib2.0-bin
 upower
 fonts-wqy-zenhei

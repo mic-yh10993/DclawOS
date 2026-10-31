@@ -12,7 +12,7 @@ component: it needs a DOM to run. Hosting it here would mean a
 browser engine
 — a web view — which the user's binding constraints forbid ("no
 Electron, no web views") and which would break the lightweight native
-GTK3 direction. So the editor is built on GtkSourceView (GNOME's
+GTK direction. So the editor is built on GtkSourceView (GNOME's
 native code-editing widget: syntax highlighting, line numbers,
 search) instead. What transfers from VSCode is the STRUCTURE (card
 §8 row 109 already says "structure reference only"): a files view for
@@ -37,9 +37,10 @@ sys.path.insert(0, os.path.join(
 
 import gi  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("GtkSource", "4")
-from gi.repository import Gtk, GLib, GtkSource  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("GtkSource", "5")
+from gi.repository import Adw, Gtk, GLib, GtkSource  # noqa: E402
 
 try:
     import modifiedfiles
@@ -53,9 +54,84 @@ def log(msg):
     print(f"dclawos-editor: {msg}", flush=True)
 
 
+def _append_expand(box, child, expand=False):
+    """GTK4 Box packing (pack_start/pack_end were removed): append
+    (or prepend) and translate the old expand flag onto the child's
+    expand property along the box orientation.
+    // reuse-check: GTK4 migration idiom written for DclawOS; the
+      helper exists so every pre-GTK4 pack call site keeps its
+      expand semantics with the child evaluated exactly once."""
+    box.append(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def _prepend_expand(box, child, expand=False):
+    box.prepend(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def run_dialog(dialog):
+    """GTK4 replacement for Gtk.Dialog.run() (removed in GTK4):
+    present the dialog and run a nested GLib main loop until the
+    dialog emits "response" (or is closed), then return the
+    response id. Callers keep their synchronous shape; the dialog
+    itself is a real GTK4 Dialog/FileChooser/MessageDialog.
+    // reuse-check: pattern is the GTK4 migration guide's own
+      response-signal idiom, adapted to a nested MainLoop so the
+      pre-GTK4 call sites keep their control flow unchanged."""
+    loop = GLib.MainLoop()
+    holder = {"response": Gtk.ResponseType.CANCEL}
+
+    def _on_response(_dialog, response):
+        holder["response"] = response
+        loop.quit()
+
+    def _on_close(_dialog):
+        loop.quit()
+        return False
+
+    dialog.connect("response", _on_response)
+    dialog.connect("close-request", _on_close)
+    dialog.present()
+    loop.run()
+    return holder["response"]
+
+
+def run_window(window):
+    """GTK4 main loop for a top-level window (Gtk.main() and the
+    "destroy" signal were removed in GTK4): present the window and
+    run a GLib main loop until it emits "close-request"."""
+    loop = GLib.MainLoop()
+
+    def _on_close(_window):
+        loop.quit()
+        return False
+
+    window.connect("close-request", _on_close)
+    window.present()
+    loop.run()
+    return 0
+
+
 def load_text(path):
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         return handle.read()
+
+
+def _iter(result):
+    """GTK4 Gtk.TextBuffer.get_iter_at_* returns (success, iter);
+    GtkSource 4/GTK3 returned the iter directly. Unwrap either."""
+    return result[1] if isinstance(result, tuple) else result
 
 
 def make_source_view():
@@ -96,11 +172,11 @@ def highlight_lines(buffer, start_line, end_line):
     if tag is None:
         tag = buffer.create_tag("dclawos-changed", background="#ffe0b2")
     line_count = buffer.get_line_count()
-    start = buffer.get_iter_at_line(min(start_line, line_count - 1))
+    start = _iter(buffer.get_iter_at_line(min(start_line, line_count - 1)))
     if end_line >= line_count:
         end = buffer.get_end_iter()
     else:
-        end = buffer.get_iter_at_line(end_line)
+        end = _iter(buffer.get_iter_at_line(end_line))
     buffer.apply_tag(tag, start, end)
 
 
@@ -112,8 +188,8 @@ def highlight_range(buffer, line, start_char, end_char, tag_name, color):
     tag = tag_table.lookup(tag_name)
     if tag is None:
         tag = buffer.create_tag(tag_name, background=color)
-    start = buffer.get_iter_at_line_offset(line, start_char)
-    end = buffer.get_iter_at_line_offset(line, end_char)
+    start = _iter(buffer.get_iter_at_line_offset(line, start_char))
+    end = _iter(buffer.get_iter_at_line_offset(line, end_char))
     buffer.apply_tag(tag, start, end)
 
 
@@ -135,17 +211,23 @@ class CompareWindow(Gtk.Window):
         except ImportError:
             pass
         header = Gtk.HeaderBar()
-        header.set_title("文件对比")
-        header.set_subtitle("只读对比")
-        header.set_show_close_button(True)
+        _title_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _title_label = Gtk.Label(label="文件对比")
+        _title_label.add_css_class("heading")
+        _title_box.append(_title_label)
+        _subtitle_label = Gtk.Label(label="只读对比")
+        _subtitle_label.add_css_class("dim-label")
+        _title_box.append(_subtitle_label)
+        header.set_title_widget(_title_box)
         self.set_titlebar(header)
         try:
             left_text = load_text(left_path)
             right_text = load_text(right_path)
         except OSError as exc:
             label = Gtk.Label(label=f"对比读取失败：{exc}")
-            self.add(label)
-            self.show_all()
+            self.set_child(label)
+            self.present()
             return
         left_lines = left_text.splitlines()
         right_lines = right_text.splitlines()
@@ -154,12 +236,15 @@ class CompareWindow(Gtk.Window):
         changed = sum(1 for op in opcodes if op[0] != "equal")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
-        self.add(box)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        self.set_child(box)
         header = Gtk.Label(
             label=f"左：{left_path}\n右：{right_path}\n{changed} 处不同")
         header.set_halign(Gtk.Align.START)
-        box.pack_start(header, False, False, 0)
+        _append_expand(box, header, False)
 
         left_view, left_buffer = make_source_view()
         right_view, right_buffer = make_source_view()
@@ -191,11 +276,15 @@ class CompareWindow(Gtk.Window):
                                         "#ffb74d")
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         left_scrolled = Gtk.ScrolledWindow()
-        left_scrolled.add(left_view)
-        paned.pack1(left_scrolled, True, False)
+        left_scrolled.set_child(left_view)
+        paned.set_start_child(left_scrolled)
+        paned.set_resize_start_child(True)
+        paned.set_shrink_start_child(False)
         right_scrolled = Gtk.ScrolledWindow()
-        right_scrolled.add(right_view)
-        paned.pack2(right_scrolled, True, False)
+        right_scrolled.set_child(right_view)
+        paned.set_end_child(right_scrolled)
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
         # Scroll sync: mirror the vertical adjustment both ways. The
         # guard flag breaks the feedback loop (setting one adjustment
         # fires the other's handler, which must then do nothing).
@@ -221,39 +310,41 @@ class CompareWindow(Gtk.Window):
             "value-changed", sync_from_left)
         right_scrolled.get_vadjustment().connect(
             "value-changed", sync_from_right)
-        box.pack_start(paned, True, True, 0)
-        self.show_all()
+        _append_expand(box, paned, True)
+        self.present()
 
 
 class CompareDialog(Gtk.Dialog):
     def __init__(self, parent):
         super().__init__(title="对比两个文件", transient_for=parent,
-                         flags=Gtk.DialogFlags.MODAL)
+                         modal=True)
         self.add_button("取消", Gtk.ResponseType.CANCEL)
         self.add_button("对比", Gtk.ResponseType.OK)
         area = self.get_content_area()
-        area.set_border_width(8)
+        area.set_margin_top(8)
+        area.set_margin_bottom(8)
+        area.set_margin_start(8)
+        area.set_margin_end(8)
         self.entries = []
         for label_text in ("左文件：", "右文件："):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            row.pack_start(Gtk.Label(label=label_text), False, False, 0)
+            _append_expand(row, Gtk.Label(label=label_text), False)
             entry = Gtk.Entry()
-            row.pack_start(entry, True, True, 0)
+            _append_expand(row, entry, True)
             browse = Gtk.Button(label="浏览…")
             browse.connect("clicked", self.on_browse, entry)
-            row.pack_start(browse, False, False, 0)
-            area.pack_start(row, False, False, 0)
+            _append_expand(row, browse, False)
+            _append_expand(area, row, False)
             self.entries.append(entry)
-        self.show_all()
-
     def on_browse(self, _button, entry):
         dialog = Gtk.FileChooserDialog(
             title="选择文件", transient_for=self,
             action=Gtk.FileChooserAction.OPEN)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
         dialog.add_button("选择", Gtk.ResponseType.OK)
-        if dialog.run() == Gtk.ResponseType.OK:
-            entry.set_text(dialog.get_filename() or "")
+        if run_dialog(dialog) == Gtk.ResponseType.OK:
+            _file = dialog.get_file()
+            entry.set_text(_file.get_path() if _file else "")
         dialog.destroy()
 
 
@@ -267,15 +358,24 @@ class EditorApp(Gtk.Window):
         except ImportError:
             pass
         header = Gtk.HeaderBar()
-        header.set_title("编辑器")
-        header.set_subtitle("代码编辑")
-        header.set_show_close_button(True)
+        _title_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _title_label = Gtk.Label(label="编辑器")
+        _title_label.add_css_class("heading")
+        _title_box.append(_title_label)
+        _subtitle_label = Gtk.Label(label="代码编辑")
+        _subtitle_label.add_css_class("dim-label")
+        _title_box.append(_subtitle_label)
+        header.set_title_widget(_title_box)
         self.set_titlebar(header)
         self.current_path = None
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
-        self.add(box)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        self.set_child(box)
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_open = Gtk.Button(label="打开")
@@ -294,46 +394,46 @@ class EditorApp(Gtk.Window):
         btn_redo.connect("clicked", self.on_redo)
         for btn in (btn_open, btn_save, btn_compare, btn_terminal,
                     btn_undo, btn_redo):
-            toolbar.pack_start(btn, False, False, 0)
-        box.pack_start(toolbar, False, False, 0)
+            _append_expand(toolbar, btn, False)
+        _append_expand(box, toolbar, False)
 
         find_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        find_row.pack_start(Gtk.Label(label="查找："), False, False, 0)
+        _append_expand(find_row, Gtk.Label(label="查找："), False)
         self.find_entry = Gtk.Entry()
         self.find_entry.connect("activate", self.on_find_next)
-        find_row.pack_start(self.find_entry, True, True, 0)
+        _append_expand(find_row, self.find_entry, True)
         btn_next = Gtk.Button(label="下一个")
         btn_next.connect("clicked", self.on_find_next)
         btn_prev = Gtk.Button(label="上一个")
         btn_prev.connect("clicked", self.on_find_prev)
-        find_row.pack_start(btn_next, False, False, 0)
-        find_row.pack_start(btn_prev, False, False, 0)
-        box.pack_start(find_row, False, False, 0)
+        _append_expand(find_row, btn_next, False)
+        _append_expand(find_row, btn_prev, False)
+        _append_expand(box, find_row, False)
 
         # Phase 3 module 6: replace row + goto-line row (native,
         # no browser engine). Replace uses plain-text search so it
         # behaves identically to find.
         replace_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        replace_row.pack_start(Gtk.Label(label="替换为："), False, False, 0)
+        _append_expand(replace_row, Gtk.Label(label="替换为："), False)
         self.replace_entry = Gtk.Entry()
-        replace_row.pack_start(self.replace_entry, True, True, 0)
+        _append_expand(replace_row, self.replace_entry, True)
         btn_replace = Gtk.Button(label="替换")
         btn_replace.connect("clicked", self.on_replace)
         btn_replace_all = Gtk.Button(label="全部替换")
         btn_replace_all.connect("clicked", self.on_replace_all)
-        replace_row.pack_start(btn_replace, False, False, 0)
-        replace_row.pack_start(btn_replace_all, False, False, 0)
-        box.pack_start(replace_row, False, False, 0)
+        _append_expand(replace_row, btn_replace, False)
+        _append_expand(replace_row, btn_replace_all, False)
+        _append_expand(box, replace_row, False)
 
         goto_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        goto_row.pack_start(Gtk.Label(label="跳到行："), False, False, 0)
+        _append_expand(goto_row, Gtk.Label(label="跳到行："), False)
         self.goto_entry = Gtk.Entry()
         self.goto_entry.connect("activate", self.on_goto_line)
-        goto_row.pack_start(self.goto_entry, False, False, 0)
+        _append_expand(goto_row, self.goto_entry, False)
         btn_goto = Gtk.Button(label="跳转")
         btn_goto.connect("clicked", self.on_goto_line)
-        goto_row.pack_start(btn_goto, False, False, 0)
-        box.pack_start(goto_row, False, False, 0)
+        _append_expand(goto_row, btn_goto, False)
+        _append_expand(box, goto_row, False)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.sidebar_store = Gtk.ListStore(str, str)
@@ -347,21 +447,25 @@ class EditorApp(Gtk.Window):
         sidebar_tree.append_column(time_column)
         sidebar_tree.connect("row-activated", self.on_sidebar_open)
         sidebar_scrolled = Gtk.ScrolledWindow()
-        sidebar_scrolled.add(sidebar_tree)
-        paned.pack1(sidebar_scrolled, False, False)
+        sidebar_scrolled.set_child(sidebar_tree)
+        paned.set_start_child(sidebar_scrolled)
+        paned.set_resize_start_child(False)
+        paned.set_shrink_start_child(False)
 
         self.view, self.buffer = make_source_view()
         self.buffer.connect("modified-changed", self.on_modified_changed)
         editor_scrolled = Gtk.ScrolledWindow()
-        editor_scrolled.add(self.view)
-        paned.pack2(editor_scrolled, True, False)
-        box.pack_start(paned, True, True, 0)
+        editor_scrolled.set_child(self.view)
+        paned.set_end_child(editor_scrolled)
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
+        _append_expand(box, paned, True)
 
         self.status = Gtk.Label(label="")
         self.status.set_halign(Gtk.Align.START)
-        box.pack_start(self.status, False, False, 0)
+        _append_expand(box, self.status, False)
 
-        self.connect("delete-event", self.on_close)
+        self.connect("close-request", self.on_close)
         self.refresh_sidebar()
         GLib.timeout_add(SIDEBAR_POLL_MS, self.refresh_sidebar)
         if initial_path:
@@ -395,7 +499,7 @@ class EditorApp(Gtk.Window):
         dialog.add_button("保存", Gtk.ResponseType.YES)
         dialog.add_button("放弃", Gtk.ResponseType.NO)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
-        response = dialog.run()
+        response = run_dialog(dialog)
         dialog.destroy()
         if response == Gtk.ResponseType.YES:
             return self.save_file()
@@ -403,7 +507,8 @@ class EditorApp(Gtk.Window):
             return True
         return False
 
-    def on_close(self, _window, _event):
+    def on_close(self, _window):
+        # GTK4 close-request: returning True vetoes the close.
         return not self.confirm_discard()
 
     def open_file(self, path):
@@ -428,11 +533,14 @@ class EditorApp(Gtk.Window):
                 action=Gtk.FileChooserAction.SAVE)
             dialog.add_button("取消", Gtk.ResponseType.CANCEL)
             dialog.add_button("保存", Gtk.ResponseType.OK)
-            if dialog.run() != Gtk.ResponseType.OK:
+            if run_dialog(dialog) != Gtk.ResponseType.OK:
                 dialog.destroy()
                 return False
-            self.current_path = dialog.get_filename()
+            _file = dialog.get_file()
+            self.current_path = _file.get_path() if _file else None
             dialog.destroy()
+            if not self.current_path:
+                return False
         try:
             start, end = self.buffer.get_bounds()
             with open(self.current_path, "w", encoding="utf-8") as handle:
@@ -459,8 +567,9 @@ class EditorApp(Gtk.Window):
             action=Gtk.FileChooserAction.OPEN)
         dialog.add_button("取消", Gtk.ResponseType.CANCEL)
         dialog.add_button("打开", Gtk.ResponseType.OK)
-        if dialog.run() == Gtk.ResponseType.OK:
-            filename = dialog.get_filename()
+        if run_dialog(dialog) == Gtk.ResponseType.OK:
+            _file = dialog.get_file()
+            filename = _file.get_path() if _file else ""
             dialog.destroy()
             if filename:
                 self.open_file(filename)
@@ -484,7 +593,7 @@ class EditorApp(Gtk.Window):
 
     def on_compare(self, _button):
         dialog = CompareDialog(self)
-        if dialog.run() == Gtk.ResponseType.OK:
+        if run_dialog(dialog) == Gtk.ResponseType.OK:
             left = dialog.entries[0].get_text().strip()
             right = dialog.entries[1].get_text().strip()
             dialog.destroy()
@@ -508,16 +617,18 @@ class EditorApp(Gtk.Window):
             context = GtkSource.SearchContext.new(self.buffer, settings)
             context.set_highlight(True)
             cursor = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+            # GtkSource 5 returns (found, start, end, wrapped);
+            # take the first three (same semantics as GtkSource 4).
             if forward:
-                found, start, end = context.forward(cursor)
+                found, start, end = context.forward(cursor)[:3]
                 if not found:
                     found, start, end = context.forward(
-                        self.buffer.get_start_iter())
+                        self.buffer.get_start_iter())[:3]
             else:
-                found, start, end = context.backward(cursor)
+                found, start, end = context.backward(cursor)[:3]
                 if not found:
                     found, start, end = context.backward(
-                        self.buffer.get_end_iter())
+                        self.buffer.get_end_iter())[:3]
         except Exception as exc:
             self.set_status(f"查找失败：{exc}")
             return
@@ -534,13 +645,18 @@ class EditorApp(Gtk.Window):
         self.find(forward=False)
 
     def on_undo(self, _button):
-        if self.buffer.can_undo():
+        # GtkSource 5 renamed can_undo() to get_can_undo().
+        _can = getattr(self.buffer, "get_can_undo", None) \
+            or self.buffer.can_undo
+        if _can():
             self.buffer.undo()
         else:
             self.set_status("没有可撤销的操作")
 
     def on_redo(self, _button):
-        if self.buffer.can_redo():
+        _can = getattr(self.buffer, "get_can_redo", None) \
+            or self.buffer.can_redo
+        if _can():
             self.buffer.redo()
         else:
             self.set_status("没有可重做的操作")
@@ -594,8 +710,8 @@ class EditorApp(Gtk.Window):
                 count += 1
                 # Continue after the replacement so a replacement
                 # containing the needle cannot loop forever.
-                cursor = self.buffer.get_iter_at_offset(
-                    match_start.get_offset() + len(replacement))
+                cursor = _iter(self.buffer.get_iter_at_offset(
+                    match_start.get_offset() + len(replacement)))
         finally:
             self.buffer.end_user_action()
         self.set_status(f"已替换 {count} 处")
@@ -610,7 +726,7 @@ class EditorApp(Gtk.Window):
         if line_no < 1 or line_no > line_count:
             self.set_status(f"行号超出范围（1–{line_count}）")
             return
-        line_iter = self.buffer.get_iter_at_line(line_no - 1)
+        line_iter = _iter(self.buffer.get_iter_at_line(line_no - 1))
         self.buffer.place_cursor(line_iter)
         self.view.scroll_to_iter(line_iter, 0.0, False, 0.0, 0.0)
         self.set_status(f"已跳到第 {line_no} 行")
@@ -647,11 +763,8 @@ def main():
         print("usage: dclawos-editor [file]")
         return 0
     initial = sys.argv[1] if len(sys.argv) > 1 else None
-    app = EditorApp(initial)
-    app.connect("destroy", Gtk.main_quit)
-    app.show_all()
-    Gtk.main()
-    return 0
+    Adw.init()
+    return run_window(EditorApp(initial))
 
 
 if __name__ == "__main__":

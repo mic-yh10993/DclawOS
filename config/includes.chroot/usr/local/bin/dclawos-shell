@@ -72,6 +72,12 @@ except Exception:  # noqa: BLE001 - indicator is additive
 import gi
 
 gi.require_version("Gtk", "3.0")
+# Phase 6 M5 coexistence pin: the image now also ships the GTK4
+# typelibs (for the migrated windows), and an unpinned Gdk import
+# would resolve to Gdk 4.0 and then conflict with Gtk 3.0. The
+# taskbar stays GTK3 (Wnck exception, docs/UI-FUNCTIONS.md), so
+# Gdk is pinned to 3.0 explicitly. Geometry/logic untouched.
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk, GLib, Gio  # noqa: E402
 
 try:

@@ -3,7 +3,7 @@
 
 M4 rebuild: the window is now a WebView HOST around the local
 dashboard page (/usr/share/dclawos/dashboard.html), following the
-M2 settings / M3 chat host pattern (WebKit2 4.1, typed bridge
+M2 settings / M3 chat host pattern (typed bridge
 dispatch, event-bus subscription forwarding). All logic lives in
 dashboardlib.DashboardHost (headless, gate-tested by
 dashboardtest.py):
@@ -24,9 +24,9 @@ dashboardtest.py):
 - The approval overlay lives on the page; verdicts are written
   by the host through chatlib.apply_verdict, the one shared
   dclawos-approve write path (see dashboardlib).
-- If WebKit2 is unavailable the window degrades to an
-  explanatory label (no second full UI is maintained). The
-  GTK4 shell migration is M5, not this module.
+- If WebKit is unavailable the window degrades to an
+  explanatory label (no second full UI is maintained). Phase 6
+  M5: this host is GTK4 + WebKitGTK 6.0 (docs/UI-FUNCTIONS.md).
 
 The binary name and launch entry are unchanged.
 
@@ -68,8 +68,9 @@ except ImportError:
 
 import gi
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 EVENTS_PATH = os.environ.get("DCLAWOS_EVENTS_PATH",
                              "/var/lib/dclawos/events.jsonl")
@@ -106,6 +107,75 @@ def _share_event_file():
         pass
 
 
+def _append_expand(box, child, expand=False):
+    """GTK4 Box packing (pack_start/pack_end were removed): append
+    (or prepend) and translate the old expand flag onto the child's
+    expand property along the box orientation.
+    // reuse-check: GTK4 migration idiom written for DclawOS; the
+      helper exists so every pre-GTK4 pack call site keeps its
+      expand semantics with the child evaluated exactly once."""
+    box.append(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def _prepend_expand(box, child, expand=False):
+    box.prepend(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def run_dialog(dialog):
+    """GTK4 replacement for Gtk.Dialog.run() (removed in GTK4):
+    present the dialog and run a nested GLib main loop until the
+    dialog emits "response" (or is closed), then return the
+    response id. Callers keep their synchronous shape; the dialog
+    itself is a real GTK4 Dialog/FileChooser/MessageDialog.
+    // reuse-check: pattern is the GTK4 migration guide's own
+      response-signal idiom, adapted to a nested MainLoop so the
+      pre-GTK4 call sites keep their control flow unchanged."""
+    loop = GLib.MainLoop()
+    holder = {"response": Gtk.ResponseType.CANCEL}
+
+    def _on_response(_dialog, response):
+        holder["response"] = response
+        loop.quit()
+
+    def _on_close(_dialog):
+        loop.quit()
+        return False
+
+    dialog.connect("response", _on_response)
+    dialog.connect("close-request", _on_close)
+    dialog.present()
+    loop.run()
+    return holder["response"]
+
+
+def run_window(window):
+    """GTK4 main loop for a top-level window (Gtk.main() and the
+    "destroy" signal were removed in GTK4): present the window and
+    run a GLib main loop until it emits "close-request"."""
+    loop = GLib.MainLoop()
+
+    def _on_close(_window):
+        loop.quit()
+        return False
+
+    window.connect("close-request", _on_close)
+    window.present()
+    loop.run()
+    return 0
+
+
 class DashboardWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-dashboard")
@@ -116,9 +186,15 @@ class DashboardWindow(Gtk.Window):
         except ImportError:
             pass
         header = Gtk.HeaderBar()
-        header.set_title("AI 看板")
-        header.set_subtitle("AI 运行状态")
-        header.set_show_close_button(True)
+        _title_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _title_label = Gtk.Label(label="AI 看板")
+        _title_label.add_css_class("heading")
+        _title_box.append(_title_label)
+        _subtitle_label = Gtk.Label(label="AI 运行状态")
+        _subtitle_label.add_css_class("dim-label")
+        _title_box.append(_subtitle_label)
+        header.set_title_widget(_title_box)
         self.set_titlebar(header)
 
         self.host = dashboardlib.DashboardHost() \
@@ -126,28 +202,29 @@ class DashboardWindow(Gtk.Window):
         self.webview = None
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.add(box)
+        self.set_child(box)
         try:
-            gi.require_version("WebKit2", "4.1")
-            from gi.repository import WebKit2
+            gi.require_version("WebKit", "6.0")
+            from gi.repository import WebKit
         except (ImportError, ValueError) as exc:
             label = Gtk.Label(
-                label=f"WebKitGTK 4.1 不可用（{exc}），看板 WebView "
+                label=f"WebKitGTK 6.0 不可用（{exc}），看板 WebView "
                       "无法加载。事件流仍在写入事件文件，监视与设置"
                       "不受影响；本窗口不维护第二套界面。")
-            label.set_line_wrap(True)
+            label.set_wrap(True)
             label.set_halign(Gtk.Align.START)
-            box.pack_start(label, True, True, 8)
+            _append_expand(box, label, True)
             return
-        manager = WebKit2.UserContentManager()
+        manager = WebKit.UserContentManager()
         manager.register_script_message_handler("dclawos")
         manager.connect("script-message-received::dclawos",
                         self._on_bridge_message)
         try:
-            webview = WebKit2.WebView.new_with_user_content_manager(
-                manager)
-        except Exception:  # noqa: BLE001 - older binding shape
-            webview = WebKit2.WebView()
+            webview = WebKit.WebView(user_content_manager=manager)
+        except Exception:  # noqa: BLE001 - binding without the
+            # construct property: plain view (bridge unavailable,
+            # page still renders; host verbs are additive)
+            webview = WebKit.WebView()
         self.webview = webview
         if os.path.exists(DASHBOARD_PAGE_PATH):
             webview.load_uri("file://" + DASHBOARD_PAGE_PATH)
@@ -156,7 +233,7 @@ class DashboardWindow(Gtk.Window):
                 "<html><body><p>看板页面资源缺失："
                 + DASHBOARD_PAGE_PATH + "</p></body></html>",
                 "file:///")
-        box.pack_start(webview, True, True, 0)
+        _append_expand(box, webview, True)
         # Push: subscribe to the M1 event bus; dashboardlib folds
         # each event into host state and decides what the page
         # receives. Subscription lifecycle only — there is
@@ -168,11 +245,13 @@ class DashboardWindow(Gtk.Window):
                     self._on_bus_event_thread).start()
             except Exception as exc:  # noqa: BLE001 - push is additive
                 log(f"event subscription unavailable: {exc}")
-        self.connect("focus-in-event", self._on_focus_in)
+        _focus = Gtk.EventControllerFocus()
+        _focus.connect("enter", self._on_focus_in)
+        self.add_controller(_focus)
 
     # ------------------------------------------------------------ bridge
 
-    def _on_focus_in(self, _window, _event):
+    def _on_focus_in(self, _controller):
         # Re-read shared state on focus (M2/M3 host pattern): the
         # page re-requests its state snapshot on this push.
         self._push_event("settings", {"reason": "focus"})
@@ -294,12 +373,10 @@ def main():
     log("dclawos-dashboard started (Phase 6 M4: WebView dashboard)")
     append_event({"ts": int(time.time()), "type": "system",
                   "summary": "AI 看板已启动，等待 agent 事件", "session": ""})
+    Adw.init()
     win = DashboardWindow()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
     win.maximize()
-    Gtk.main()
-    return 0
+    return run_window(win)
 
 
 if __name__ == "__main__":

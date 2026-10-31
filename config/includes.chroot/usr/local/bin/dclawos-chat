@@ -3,7 +3,7 @@
 
 M3 rebuild: the window is now a WebView HOST around the local
 chat page (/usr/share/dclawos/chat.html), following the M2
-dclawos-settings host pattern (WebKit2 4.1, typed bridge dispatch,
+dclawos-settings host pattern (typed bridge dispatch,
 event-bus subscription forwarding, focus re-read). All chat logic
 lives in chatlib.ChatHost (headless, gate-tested by chattest.py):
 
@@ -21,9 +21,9 @@ lives in chatlib.ChatHost (headless, gate-tested by chattest.py):
   chatlib's copy of the dclawos-approve verdict write; tool steps
   and live output are forwarded from the bus, filtered host-side
   to this window's tasks (chatlib.handle_bus_event).
-- If WebKit2 is unavailable the window degrades to an explanatory
-  label (no second full UI is maintained). The GTK4 shell
-  migration is M5, not this module.
+- If WebKit is unavailable the window degrades to an explanatory
+  label (no second full UI is maintained). Phase 6 M5: this
+  host is GTK4 + WebKitGTK 6.0 (see docs/UI-FUNCTIONS.md).
 
 The binary name and launch entry are unchanged.
 """
@@ -48,8 +48,9 @@ except ImportError:
 
 import gi
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk, Gdk, GLib  # noqa: E402
 
 CHAT_PAGE_PATH = "/usr/share/dclawos/chat.html"
 HELP_TEXT = chatlib.HELP_TEXT if chatlib is not None else ""
@@ -57,6 +58,75 @@ HELP_TEXT = chatlib.HELP_TEXT if chatlib is not None else ""
 
 def log(msg):
     print(f"dclawos-chat: {msg}", flush=True)
+
+
+def _append_expand(box, child, expand=False):
+    """GTK4 Box packing (pack_start/pack_end were removed): append
+    (or prepend) and translate the old expand flag onto the child's
+    expand property along the box orientation.
+    // reuse-check: GTK4 migration idiom written for DclawOS; the
+      helper exists so every pre-GTK4 pack call site keeps its
+      expand semantics with the child evaluated exactly once."""
+    box.append(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def _prepend_expand(box, child, expand=False):
+    box.prepend(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def run_dialog(dialog):
+    """GTK4 replacement for Gtk.Dialog.run() (removed in GTK4):
+    present the dialog and run a nested GLib main loop until the
+    dialog emits "response" (or is closed), then return the
+    response id. Callers keep their synchronous shape; the dialog
+    itself is a real GTK4 Dialog/FileChooser/MessageDialog.
+    // reuse-check: pattern is the GTK4 migration guide's own
+      response-signal idiom, adapted to a nested MainLoop so the
+      pre-GTK4 call sites keep their control flow unchanged."""
+    loop = GLib.MainLoop()
+    holder = {"response": Gtk.ResponseType.CANCEL}
+
+    def _on_response(_dialog, response):
+        holder["response"] = response
+        loop.quit()
+
+    def _on_close(_dialog):
+        loop.quit()
+        return False
+
+    dialog.connect("response", _on_response)
+    dialog.connect("close-request", _on_close)
+    dialog.present()
+    loop.run()
+    return holder["response"]
+
+
+def run_window(window):
+    """GTK4 main loop for a top-level window (Gtk.main() and the
+    "destroy" signal were removed in GTK4): present the window and
+    run a GLib main loop until it emits "close-request"."""
+    loop = GLib.MainLoop()
+
+    def _on_close(_window):
+        loop.quit()
+        return False
+
+    window.connect("close-request", _on_close)
+    window.present()
+    loop.run()
+    return 0
 
 
 class ChatWindow(Gtk.Window):
@@ -69,9 +139,15 @@ class ChatWindow(Gtk.Window):
         except ImportError:
             pass
         header = Gtk.HeaderBar()
-        header.set_title("AI 聊天")
-        header.set_subtitle("指派任务与工具控制台")
-        header.set_show_close_button(True)
+        _title_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _title_label = Gtk.Label(label="AI 聊天")
+        _title_label.add_css_class("heading")
+        _title_box.append(_title_label)
+        _subtitle_label = Gtk.Label(label="指派任务与工具控制台")
+        _subtitle_label.add_css_class("dim-label")
+        _title_box.append(_subtitle_label)
+        header.set_title_widget(_title_box)
         self.set_titlebar(header)
 
         self.host = chatlib.ChatHost(
@@ -80,28 +156,29 @@ class ChatWindow(Gtk.Window):
         self.webview = None
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.add(box)
+        self.set_child(box)
         try:
-            gi.require_version("WebKit2", "4.1")
-            from gi.repository import WebKit2
+            gi.require_version("WebKit", "6.0")
+            from gi.repository import WebKit
         except (ImportError, ValueError) as exc:
             label = Gtk.Label(
-                label=f"WebKitGTK 4.1 不可用（{exc}），聊天 WebView "
+                label=f"WebKitGTK 6.0 不可用（{exc}），聊天 WebView "
                       "无法加载。模型与任务仍可通过看板与设置使用；"
                       "本窗口不维护第二套界面。")
-            label.set_line_wrap(True)
+            label.set_wrap(True)
             label.set_halign(Gtk.Align.START)
-            box.pack_start(label, True, True, 8)
+            _append_expand(box, label, True)
             return
-        manager = WebKit2.UserContentManager()
+        manager = WebKit.UserContentManager()
         manager.register_script_message_handler("dclawos")
         manager.connect("script-message-received::dclawos",
                         self._on_bridge_message)
         try:
-            webview = WebKit2.WebView.new_with_user_content_manager(
-                manager)
-        except Exception:  # noqa: BLE001 - older binding shape
-            webview = WebKit2.WebView()
+            webview = WebKit.WebView(user_content_manager=manager)
+        except Exception:  # noqa: BLE001 - binding without the
+            # construct property: plain view (bridge unavailable,
+            # page still renders; host verbs are additive)
+            webview = WebKit.WebView()
         self.webview = webview
         if os.path.exists(CHAT_PAGE_PATH):
             webview.load_uri("file://" + CHAT_PAGE_PATH)
@@ -109,7 +186,7 @@ class ChatWindow(Gtk.Window):
             webview.load_html(
                 "<html><body><p>聊天页面资源缺失："
                 + CHAT_PAGE_PATH + "</p></body></html>", "file:///")
-        box.pack_start(webview, True, True, 0)
+        _append_expand(box, webview, True)
         # Push: subscribe to the M1 event bus; chatlib filters to
         # this window's tasks/conversation before anything is
         # forwarded to the page. Subscription lifecycle only —
@@ -121,15 +198,21 @@ class ChatWindow(Gtk.Window):
                 self._on_bus_event).start()
         except Exception as exc:  # noqa: BLE001 - push is additive
             log(f"event subscription unavailable: {exc}")
-        self.connect("focus-in-event", self._on_focus_in)
+        _focus = Gtk.EventControllerFocus()
+        _focus.connect("enter", self._on_focus_in)
+        self.add_controller(_focus)
 
     # ------------------------------------------------------------ bridge
 
     def _clipboard_copy(self, text):
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(text, -1)
+        # GTK4: Gtk.Clipboard is gone; the display clipboard is
+        # Gdk.Clipboard and set() takes the text value directly
+        # (verified against the GTK 4 API in the M5 smoke run).
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(text)
 
-    def _on_focus_in(self, _window, _event):
+    def _on_focus_in(self, _controller):
         # Re-read shared state on focus (M2 host pattern): the page
         # refreshes its session/model state from the shared stores.
         self._push_event("settings", {"reason": "focus"})
@@ -241,11 +324,8 @@ def main():
         print("usage: dclawos-chat (creates tasks for dclawos-agent)")
         return 0
     log("dclawos-chat started (Phase 6 M3: WebView chat + streaming)")
-    win = ChatWindow()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    Gtk.main()
-    return 0
+    Adw.init()
+    return run_window(ChatWindow())
 
 
 if __name__ == "__main__":

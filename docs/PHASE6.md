@@ -767,7 +767,165 @@ chat page). No other deviation.
 | P6-M2 model settings complete (WebView + routing wiring + usage ledger) | (this commit) | — | pending |
 | P6-M3 chat WebView + true streaming (SSE openai/passthrough, staged claude) | (this commit) | — | pending |
 | P6-M4 dashboard WebView + taskbar agent state + approval overlay | (this commit) | — | pending |
+| P6-M5 GTK4+libadwaita migration + UI-FUNCTIONS gate | (this commit) | — | pending |
 
 ## Later modules (not started)
 
 - M5 GTK4 migration, M6 close-out.
+
+## M5 — GTK4 + libadwaita migration & function-map gate
+
+State: **CLOSED** (this module; build verification in the ledger
+row below).
+
+### Gate-first document
+
+`docs/UI-FUNCTIONS.md` was written BEFORE any window was touched:
+the full function inventory assembled from repo evidence only
+(PHASE4-GAP / PHASE5 / this file's M1–M4 ledgers, bin docstrings,
+settingslib KEY_SPECS — 8 keys row by row, registrylib's six
+categories, toolslib's 27 tool schemas one row each, the four
+bridge surfaces, the broker secret store). Every row has a
+landing point and a status from the document's own vocabulary
+（已映射-GTK4 / 已映射-WebView / GTK3例外-Wnck / 不适用-非GTK /
+未实现-已排队）. The scoped-approval queue record from M4 has its
+own 未实现-已排队 row (landing point: P0/usability stage), as do
+WhatsApp (BLOCKED-NAMED in Phase 5) and IRC/Mattermost
+(deferred in Phase 5). No row was deleted to fake coverage.
+
+### apt verification (Bookworm — the image's distro)
+
+Verified on packages.debian.org/bookworm on 2026-10-31 (the
+workstation's own apt is Ubuntu and was NOT used as evidence):
+
+| Package | Bookworm | Verdict |
+|---|---|---|
+| gir1.2-gtk-4.0 | 4.8.3+ds-2+deb12u1 | exists |
+| gir1.2-adw-1 | 1.2.2-1 (libadwaita-1-0 ≥ 1.2~beta) | exists |
+| gir1.2-gtksource-5 | 5.6.x series | exists |
+| gir1.2-webkit-6.0 | 2.50.6-1~deb12u2 (bookworm-security; deps gir1.2-gtk-4.0 + libwebkitgtk-6.0-4) | **exists → hosts migrate for real, NO exception** |
+
+Code was written to the Bookworm API generation (GTK 4.8 /
+Adw 1.2 / GtkSource 5.6 / WebKitGTK 6.0): no Gtk.FileDialog /
+Gtk.AlertDialog (4.10+), no Adw.ToolbarView /
+Adw.NavigationSplitView (1.4+). Dialogs use the GTK4-retained
+Gtk.Dialog / FileChooserDialog / MessageDialog with the
+`response` signal + a nested GLib main loop (`run_dialog()`,
+one helper per window — GTK4 removed `.run()`); file choosers
+use `get_file().get_path()` (GTK4 removed `get_filename()`);
+main loops are GLib.MainLoop on `close-request` (GTK4 removed
+Gtk.main() / the destroy signal); focus refresh uses
+Gtk.EventControllerFocus (GTK4 removed focus-in-event).
+
+### Per-window conclusions
+
+| Window | Conclusion |
+|---|---|
+| dclawos-settings | Migrated: Adw.ApplicationWindow shell (Adw windows reject set_titlebar — it traps; the Gtk.HeaderBar is the content box's first child, Stack+StackSidebar switching unchanged), all six panels function-preserved, model page host on WebKitGTK 6.0 (`WebKit.WebView(user_content_manager=...)` — the 4.1-era `new_with_user_content_manager` classmethod does not exist in the 6.0 binding) |
+| dclawos-editor | Migrated: GTK4 + GtkSourceView 5. Real API deltas fixed: SearchContext.forward/backward slice (5 returns a wrapped flag), buffer get_can_undo/get_can_redo (renamed), TextBuffer get_iter_at_* tuple unwrap. EDITOR-DECISION functions all preserved (open/save/find/replace/goto/undo/redo/terminal/compare/sidebar) |
+| dclawos-monitor | Migrated: GTK4 + Adw.init; stop/resume/kill + bus-push refresh unchanged; kill confirm via run_dialog |
+| dclawos-takeover | Migrated: GTK4 + Adw.init; Q2 backfill semantics untouched; its 1 s list poll is pre-existing (M1 push did not cover this window) and is recorded as-is in UI-FUNCTIONS, not hidden |
+| dclawos-approve | Migrated (kept): still a live fallback entry — dashboardlib LAUNCH_TARGETS maps approve→dclawos-approve and secret-save approvals are decided by whoever opens it; verdict write fields unchanged. NOT deleted, NOT declared superseded |
+| dclawos-chat | Host migrated: GTK4 + WebKitGTK 6.0; page + chatlib unchanged; clipboard moved to Gdk 4 (`Display.get_clipboard().set(text)`; Gtk.Clipboard is gone) |
+| dclawos-dashboard | Host migrated: GTK4 + WebKitGTK 6.0; page + dashboardlib unchanged |
+| dclawos-shell | **GTK3 EXCEPTION (named)**: Wnck (gir1.2-wnck-3.0) is GTK3-only with no GTK4 equivalent and window switching/activation depends on it; geometry (48px, _NET_WM_STRUT_PARTIAL) byte-untouched. One M5 change inside it: an explicit Gdk 3.0 pin (below) |
+| dclawos-gui | Not a window (Wnck CLI): unchanged except the same Gdk/Gtk 3.0 coexistence pin (below) |
+| dclawos-secret / dclawos-installer / other CLIs & daemons | 不适用-非GTK (registered in UI-FUNCTIONS), untouched |
+
+### Coexistence bug found & fixed by the migration (real, proven)
+
+With both GTK generations' typelibs in one image, an unpinned
+`Gdk` import resolves to Gdk 4.0 FIRST, after which Gtk 3.0
+refuses to load ("Requiring namespace 'Gdk' version '3.0', but
+'4.0' is already loaded") — the taskbar and dclawos-gui would
+have died on launch in the M5 image. Proven locally with both
+typelib generations installed (the pre-M5 shell fails exactly
+this way; with `gi.require_version("Gdk", "3.0")` pinned before
+the import, the taskbar constructs and `dclawos-gui windows`
+works). Both files carry the pin with a comment. theme.py
+likewise no longer pins Gtk 3.0 itself: it branches on the major
+version the app process already loaded.
+
+### theme / UI-RULES
+
+theme.py is dual-generation (GTK4: theme-gtk4.css /
+theme-gtk4-dark.css via add_provider_for_display; GTK3:
+original sheets via add_provider_for_screen; helpers
+apply_prose / make_section / stream_reveal branch on the loaded
+major version — GTK4 renames: Label set_wrap, Revealer
+set_child, flat class instead of ReliefStyle, iter tuples).
+Palette tokens are identical across generations (validate M5
+block asserts parity + no #000 in all sheets). docs/UI-RULES.md
+gained an additive M5 addendum; no rule was weakened.
+
+### Package list & expected ISO impact
+
+Removed: gir1.2-webkit2-4.1, gir1.2-gtksource-4. Added:
+gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, gir1.2-webkit-6.0,
+gir1.2-gtksource-5. Kept: gir1.2-gtk-3.0 + gir1.2-wnck-3.0
+(taskbar exception, dclawos-gui, LightDM greeter). WebKitGTK
+6.0 replaces a same-sized WebKitGTK 4.1; GtkSource 5 replaces 4;
+the net add is the GTK4+libadwaita stack alongside GTK3 —
+estimated +20–50 MB on the ISO (estimate only; the ledger row
+records the measured figure).
+
+### Gates changed, with reasons (verify-the-gate-first)
+
+- validate: GtkSource-4.typelib → GtkSource-5.typelib;
+  WebKit2-4.1 package/typelib assertions → WebKit 6.0; the three
+  host greps 'WebKit2' → '"WebKit", "6.0"'. Reason (M3/M4
+  precedent): these assertions pointed at the M2-era host
+  implementation; M5 moved the hosts, so the assertions now
+  point at the functions' new home. The assertions' INTENT
+  (a WebKit typelib ships; each host loads it) is unchanged.
+- validate: new M5 block — UI-FUNCTIONS existence + status
+  vocabulary + no residual unmapped table rows; per-window
+  Gtk 4.0/Adw pins and Gtk 3.0/WebKit2 absence in the final
+  image; editor GtkSource 5 pin; settings Adw.ApplicationWindow;
+  the Gtk-3.0 exception set across ALL bins equals exactly
+  {dclawos-gui, dclawos-shell}; the shell's Gdk 3.0 pin; package
+  list presence/absence; Gtk-4.0/Adw-1/GtkSource-5/WebKit-6.0
+  typelibs in the image; GTK4 theme sheets + token parity.
+- No existing test was weakened: hook 1008 is untouched and all
+  eight suites pass locally (below).
+
+### Local verification (headless, before push)
+
+The build VM is Ubuntu, not Bookworm — its GTK 4.14/Adw 1.5/
+GtkSource 5.12/WebKit 6 typelibs were installed ONLY as a
+construction-smoke environment (newer than Bookworm's; code
+avoids post-Bookworm APIs per the table above). Under Xvfb:
+settings (all six panels incl. the WebKit6 model page),
+chat host, dashboard host, editor (ctor + find + undo +
+compare window + compare dialog), monitor, takeover, approve
+all construct and present; the GTK3 taskbar constructs in the
+dual-typelib environment (after the Gdk pin); dclawos-gui runs.
+WebKit script-message delivery + evaluate_javascript +
+Gdk clipboard were exercised directly against WebKit 6.
+Suites: settingstest / eventbustest / dashboardtest /
+modeltest / chattest / agentlooptest / channeltest /
+provisiontest all pass (channeltest initially failed locally
+only because the workstation lacks the image's
+python3-websocket package; with it installed, it passes —
+environment gap, channel code untouched by M5).
+Parity note: theme.py's GTK3 apply_theme returns False under
+the workstation's GTK 3.24 for a pre-existing CSS parse
+rejection (font-feature-settings) — the BASE commit's theme.py
+returns False identically on the same machine (same artifact,
+both versions), so this is not an M5 regression; the GTK4
+branch returns True.
+
+### Named limits / not verified
+
+- Bookworm-exact runtime (GTK 4.8/Adw 1.2/GtkSource 5.6/
+  WebKitGTK 6.0-2.50) was not executed: the local smoke used
+  Ubuntu's newer stack, and CI is headless (hook 1008 +
+  validate are static/logic gates). Window construction on
+  the Bookworm generation and all GTK visuals remain
+  on-device verification items, as in every prior phase.
+- The WebView pages' JS runtime is unchanged by M5 and remains
+  as (un)verified as M2–M4 recorded; the host bridge path was
+  re-proven against WebKit 6 locally (message in, JS out).
+- dclawos-takeover's 1 s poll remains: converting it to bus
+  push is a behaviour change outside M5's migration mandate
+  and is recorded in UI-FUNCTIONS rather than silently kept.

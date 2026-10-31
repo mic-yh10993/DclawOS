@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""DclawOS human-takeover popup (Phase 2 module 6).
+"""DclawOS human-takeover popup (Phase 2 module 6; Phase 6 M5:
+GTK4 + libadwaita migration — window/dialog idioms only, the Q2
+backfill semantics in the docstring below are unchanged).
 
 Shows takeover requests (see takeoverlib.py) and lets the human resolve
 them. The human completes the step (captcha, login, verification) in
@@ -21,8 +23,9 @@ sys.path.insert(0, os.path.join(
 
 import gi  # noqa: E402
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 try:
     import takeoverlib
@@ -44,6 +47,75 @@ def log(msg):
     print(f"dclawos-takeover: {msg}", flush=True)
 
 
+
+def _append_expand(box, child, expand=False):
+    """GTK4 Box packing (pack_start/pack_end were removed): append
+    (or prepend) and translate the old expand flag onto the child's
+    expand property along the box orientation.
+    // reuse-check: GTK4 migration idiom written for DclawOS; the
+      helper exists so every pre-GTK4 pack call site keeps its
+      expand semantics with the child evaluated exactly once."""
+    box.append(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def _prepend_expand(box, child, expand=False):
+    box.prepend(child)
+    if expand:
+        if box.get_orientation() == Gtk.Orientation.VERTICAL:
+            child.set_vexpand(True)
+        else:
+            child.set_hexpand(True)
+    return child
+
+
+def run_dialog(dialog):
+    """GTK4 replacement for Gtk.Dialog.run() (removed in GTK4):
+    present the dialog and run a nested GLib main loop until the
+    dialog emits "response" (or is closed), then return the
+    response id. Callers keep their synchronous shape; the dialog
+    itself is a real GTK4 Dialog/FileChooser/MessageDialog.
+    // reuse-check: pattern is the GTK4 migration guide's own
+      response-signal idiom, adapted to a nested MainLoop so the
+      pre-GTK4 call sites keep their control flow unchanged."""
+    loop = GLib.MainLoop()
+    holder = {"response": Gtk.ResponseType.CANCEL}
+
+    def _on_response(_dialog, response):
+        holder["response"] = response
+        loop.quit()
+
+    def _on_close(_dialog):
+        loop.quit()
+        return False
+
+    dialog.connect("response", _on_response)
+    dialog.connect("close-request", _on_close)
+    dialog.present()
+    loop.run()
+    return holder["response"]
+
+
+def run_window(window):
+    """GTK4 main loop for a top-level window (Gtk.main() and the
+    "destroy" signal were removed in GTK4): present the window and
+    run a GLib main loop until it emits "close-request"."""
+    loop = GLib.MainLoop()
+
+    def _on_close(_window):
+        loop.quit()
+        return False
+
+    window.connect("close-request", _on_close)
+    window.present()
+    loop.run()
+    return 0
+
 class TakeoverApp(Gtk.Window):
     def __init__(self):
         super().__init__(title="dclawos-takeover")
@@ -54,27 +126,36 @@ class TakeoverApp(Gtk.Window):
         except ImportError:
             pass
         header = Gtk.HeaderBar()
-        header.set_title("人工接管")
-        header.set_subtitle("AI 请求你接管")
-        header.set_show_close_button(True)
+        _title_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _title_label = Gtk.Label(label="人工接管")
+        _title_label.add_css_class("heading")
+        _title_box.append(_title_label)
+        _subtitle_label = Gtk.Label(label="AI 请求你接管")
+        _subtitle_label.add_css_class("dim-label")
+        _title_box.append(_subtitle_label)
+        header.set_title_widget(_title_box)
         self.set_titlebar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
-        self.add(box)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        self.set_child(box)
 
         header = Gtk.Label(
             label="AI 接管请求 — AI 需要你帮忙完成一步操作")
         header.set_halign(Gtk.Align.START)
-        box.pack_start(header, False, False, 0)
+        _append_expand(box, header, False)
 
         note = Gtk.Label(
             label="说明：请先在你自己的会话里完成验证/登录，再回来点"
                   "按钮。这里只记录成功/失败与会话标识，绝不要在这里"
                   "输入密码、验证码或令牌。")
-        note.set_line_wrap(True)
+        note.set_wrap(True)
         note.set_halign(Gtk.Align.START)
-        box.pack_start(note, False, False, 0)
+        _append_expand(box, note, False)
 
         self.store = Gtk.ListStore(str, str, str, str, str)
         tree = Gtk.TreeView(model=self.store)
@@ -88,18 +169,18 @@ class TakeoverApp(Gtk.Window):
         tree.get_selection().connect("changed", self.on_select)
         self.tree = tree
         scrolled = Gtk.ScrolledWindow()
-        scrolled.add(tree)
-        box.pack_start(scrolled, True, True, 0)
+        scrolled.set_child(tree)
+        _append_expand(box, scrolled, True)
 
         self.detail = Gtk.Label(label="请选择一条待处理请求")
-        self.detail.set_line_wrap(True)
+        self.detail.set_wrap(True)
         self.detail.set_halign(Gtk.Align.START)
-        box.pack_start(self.detail, False, False, 0)
+        _append_expand(box, self.detail, False)
 
         self.handle_entry = Gtk.Entry()
         self.handle_entry.set_placeholder_text(
             "会话标识（可选，如已登录账号名；不要填密码/令牌）")
-        box.pack_start(self.handle_entry, False, False, 0)
+        _append_expand(box, self.handle_entry, False)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.btn_done = Gtk.Button(label="我已完成（成功）")
@@ -109,8 +190,8 @@ class TakeoverApp(Gtk.Window):
         self.btn_cancel = Gtk.Button(label="取消请求")
         self.btn_cancel.connect("clicked", self.on_resolve, "cancelled")
         for btn in (self.btn_done, self.btn_fail, self.btn_cancel):
-            buttons.pack_start(btn, False, False, 0)
-        box.pack_start(buttons, False, False, 0)
+            _append_expand(buttons, btn, False)
+        _append_expand(box, buttons, False)
 
         self.selected_id = None
         self.set_actions_sensitive(False)
@@ -191,11 +272,8 @@ def main():
         print("usage: dclawos-takeover (human popup for AI takeover "
               "requests)")
         return 0
-    app = TakeoverApp()
-    app.connect("destroy", Gtk.main_quit)
-    app.show_all()
-    Gtk.main()
-    return 0
+    Adw.init()
+    return run_window(TakeoverApp())
 
 
 if __name__ == "__main__":

@@ -171,3 +171,43 @@ typography follow the same tokens, and its clock uses `.numeric`.
 Dark variant: GSettings `org.dclawos.settings ui-dark`
 (default false) + a Settings → 通用 toggle; `theme.py` appends
 `theme-dark.css` after the base sheet when set.
+
+## Phase 6 M5 addendum — GTK4 mapping (additive record, no rule weakened)
+
+The base toolkit moved from GTK3 to GTK4+libadwaita for every
+window except the Wnck taskbar (docs/UI-FUNCTIONS.md). The 10
+rules above are unchanged; only their GTK realization notes gain
+a GTK4 column here:
+
+- Sheets: `theme.py` is dual-generation. GTK4 processes load
+  `theme-gtk4.css` / `theme-gtk4-dark.css` through
+  `Gtk.StyleContext.add_provider_for_display`; the GTK3 taskbar
+  keeps `theme.css` / `theme-dark.css` via the screen provider.
+  Both generations carry the SAME palette tokens (rule 1) —
+  parity is asserted by the validate script's M5 block, and
+  `#000` remains absent from all four sheets.
+- Rule 2 (focus double ring): the same box-shadow tokens are in
+  the GTK4 sheets; GTK4 entry/textview focus states take them
+  unchanged.
+- Rule 3 (dark weights −40): `theme-gtk4-dark.css` carries the
+  same 360/560/660 requests; the non-variable-font rounding
+  deviation recorded for GTK3 applies identically.
+- Rule 4 (streaming reveal): the GTK alpha-ramp deviation now
+  applies only to `theme.stream_reveal`'s remaining legacy
+  surface; the chat/dashboard pages are WebView-native since
+  M3/M4 (recorded there) and the GTK4 windows have no streaming
+  text surface.
+- Rule 5 (inline icons): `theme.inline_icon` is version-agnostic
+  (pixel-size + center alignment exist in both generations).
+- Rule 6 (tabular-nums): `.numeric` + `theme.apply_tnum` work in
+  both generations; GTK4's CSS parser accepts the
+  `font-feature-settings` declaration as written.
+- Rule 7 (fold): GtkRevealer remains the GTK4 primitive;
+  `theme.make_section` has a GTK4 branch (set_child/append, the
+  `flat` style class replacing the removed ReliefStyle).
+- Rule 8 (pretty wrap approximation): GTK4 renamed the Label
+  properties (`set_wrap` / `set_wrap_mode`); `theme.apply_prose`
+  branches by loaded Gtk major version, same approximation.
+- Rules 9/10 (motion + self-extinguishing feedback):
+  `theme.flash_feedback` is widget-API-compatible with GTK4
+  (label swap + opacity pulse + 2500 ms restore) and unchanged.

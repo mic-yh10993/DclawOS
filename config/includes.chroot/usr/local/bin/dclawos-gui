@@ -35,6 +35,11 @@ def fail(message):
 def wnck_screen():
     try:
         import gi
+        # Phase 6 M5 coexistence pin (see dclawos-shell): with
+        # GTK4 typelibs in the image, Wnck's Gtk/Gdk dependencies
+        # must be pinned to the 3.0 generation it belongs to.
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
         gi.require_version("Wnck", "3.0")
         from gi.repository import Wnck
     except (ImportError, ValueError) as exc:

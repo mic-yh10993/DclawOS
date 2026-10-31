@@ -1,0 +1,100 @@
+/* DclawOS dark variant — GTK4 sheet (Phase 6 M5; token parity
+   with theme-dark.css is gate-asserted). Original note: (Phase 5 module 5). Appended AFTER
+   theme.css by theme.py when org.dclawos.settings ui-dark is
+   true. Palette tokens — dark: layer-0 #0b0b0a, layer-1 #151515,
+   layer-2 #1a1a19, layer-3 #20201e, ink #f5f5f3. Iron rule 3:
+   font weights shift down 40 (400->360, 600->560, 700->660) so
+   light text does not look bloated on dark surfaces; on the
+   shipped non-variable fonts Pango rounds to the nearest real
+   face (see docs/UI-RULES.md for the honest deviation note).
+   theme.py embeds a copy as fallback; keep in sync. */
+
+window {
+    background-color: #0b0b0a;
+    color: #f5f5f3;
+    font-weight: 360;
+}
+headerbar {
+    background-color: #151515;
+    color: #f5f5f3;
+    box-shadow: inset 0 -1px #20201e;
+}
+headerbar label { color: #f5f5f3; }
+headerbar .title { font-weight: 560; }
+headerbar button {
+    background-color: transparent;
+    color: #f5f5f3;
+}
+headerbar button:hover { background-color: #1a1a19; }
+
+button {
+    background-color: #1a1a19;
+    color: #f5f5f3;
+    font-weight: 360;
+    box-shadow: inset 0 0 0 1px rgba(245, 245, 243, 0.07);
+}
+button:hover { background-color: #20201e; }
+button:active { background-color: #151515; }
+button:disabled { color: rgba(245, 245, 243, 0.4); }
+
+label { font-weight: 360; }
+entry {
+    background-color: #151515;
+    color: #f5f5f3;
+    font-weight: 360;
+    box-shadow: inset 0 0 0 1px rgba(245, 245, 243, 0.09);
+}
+entry:focus, spinbutton:focus {
+    box-shadow: inset 0 0 0 2px #7ea6d8,
+                0 0 0 4px rgba(126, 166, 216, 0.28);
+}
+textview {
+    background-color: #151515;
+    color: #f5f5f3;
+    font-weight: 360;
+}
+textview:focus {
+    box-shadow: inset 0 0 0 2px #7ea6d8,
+                0 0 0 4px rgba(126, 166, 216, 0.28);
+}
+treeview {
+    background-color: #151515;
+    color: #f5f5f3;
+    font-weight: 360;
+}
+treeview header button {
+    background-color: #0b0b0a;
+    color: #f5f5f3;
+    box-shadow: inset 0 -1px #20201e;
+}
+separator { background-color: #20201e; }
+menu, popover {
+    background-color: #20201e;
+    color: #f5f5f3;
+}
+tooltip {
+    background-color: #20201e;
+    color: #f5f5f3;
+}
+window.dclawos-taskbar {
+    background-color: #151515;
+}
+window.dclawos-taskbar button {
+    background-color: #1a1a19;
+}
+
+/* GTK4-only nodes (Phase 6 M5). */
+dialog, messagedialog {
+    background-color: #0b0b0a;
+    color: #f5f5f3;
+}
+stacksidebar row {
+    background-color: transparent;
+    color: #f5f5f3;
+}
+stacksidebar row:selected { background-color: #1a1a19; }
+switch {
+    background-color: #20201e;
+    border: none;
+}
+switch:checked { background-color: #7ea6d8; }

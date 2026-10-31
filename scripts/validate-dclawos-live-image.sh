@@ -91,7 +91,7 @@ for path in \
     etc/calamares/branding/dclawos/dclawos-mark.svg \
     usr/local/lib/dclawos/modifiedfiles.py \
     usr/local/lib/dclawos/registrylib.py \
-    usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-4.typelib \
+    usr/lib/x86_64-linux-gnu/girepository-1.0/GtkSource-5.typelib \
     usr/local/lib/dclawos/ticketlib.py \
     usr/local/lib/dclawos/takeoverlib.py \
     usr/bin/xdotool \
@@ -825,9 +825,11 @@ grep -q 'eventbustest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook.
 }
 
 # Phase 6 module M2: model settings completeness. The new libs +
-# gate test + WebView page must ship and compile; the WebKitGTK 4.1
+# gate test + WebView page must ship and compile; the WebKitGTK
 # typelib must be in the image (the settings host loads the page
-# through it); llmlib must carry the routing pass-through symbols;
+# through it — 4.1 in M2, retargeted to 6.0 by M5 when the host
+# migrated to GTK4; the assertion below follows the host, see the
+# M5 ledger in docs/PHASE6.md); llmlib must carry the symbols;
 # the settings host must wire the WebView + bridge; the page must
 # follow the palette rules (no pure-black literal, no external
 # resources — comments stripped before the negative greps);
@@ -838,12 +840,12 @@ for lib in modellib usagelib modeltest; do
     test -f "$WORK/${lib}-p6m2-extract/usr/local/lib/dclawos/${lib}.py"
     python3 -m py_compile "$WORK/${lib}-p6m2-extract/usr/local/lib/dclawos/${lib}.py"
 done
-grep -q 'gir1.2-webkit2-4.1' config/package-lists/dclawos-desktop.list.chroot || {
-    echo "package list lacks the WebKitGTK 4.1 package (M2)" >&2
+grep -q 'gir1.2-webkit-6.0' config/package-lists/dclawos-desktop.list.chroot || {
+    echo "package list lacks the WebKitGTK 6.0 package (M2 page, M5 host)" >&2
     exit 1
 }
-grep -qE '(^|/)usr/lib/x86_64-linux-gnu/girepository-1.0/WebKit2-4.1.typelib$' "$LIST" || {
-    echo "WebKit2 4.1 typelib missing from final image" >&2
+grep -qE '(^|/)usr/lib/x86_64-linux-gnu/girepository-1.0/WebKit-6.0.typelib$' "$LIST" || {
+    echo "WebKit 6.0 typelib missing from final image" >&2
     exit 1
 }
 unsquashfs -d "$WORK/modelpage-p6m2-extract" "$FS" usr/share/dclawos/model-settings.html >/dev/null 2>&1
@@ -877,8 +879,8 @@ for sym in build_request resolve_pin test_connection customPricing routerStrateg
         exit 1
     }
 done
-grep -q 'WebKit2' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
-    echo "settings host does not load WebKit2 (M2 WebView missing)" >&2
+grep -q '"WebKit", "6.0"' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings host does not load WebKit 6.0 (M2 WebView, M5 host)" >&2
     exit 1
 }
 grep -q '_model_dispatch' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
@@ -951,8 +953,8 @@ grep -q 'EventSubscriber' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat
     echo "chat host does not subscribe to the event bus" >&2
     exit 1
 }
-grep -q 'WebKit2' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
-    echo "chat host does not load WebKit2 (M3 WebView missing)" >&2
+grep -q '"WebKit", "6.0"' "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" || {
+    echo "chat host does not load WebKit 6.0 (M3 WebView, M5 host)" >&2
     exit 1
 }
 if strip_py "$WORK/dclawos-chat-extract/usr/local/bin/dclawos-chat" | grep -q 'timeout_add'; then
@@ -1064,8 +1066,8 @@ assert "dashboard.approve" in stripped, \
 assert "dashboard.launch" in stripped, \
     "dashboard page does not launch apps via the bridge"
 PYEOF
-grep -q 'WebKit2' "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" || {
-    echo "dashboard host does not load WebKit2 (M4 WebView missing)" >&2
+grep -q '"WebKit", "6.0"' "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" || {
+    echo "dashboard host does not load WebKit 6.0 (M4 WebView, M5 host)" >&2
     exit 1
 }
 if strip_py "$WORK/dclawos-dashboard-p6m1-extract/usr/local/bin/dclawos-dashboard" | grep -q 'timeout_add'; then
@@ -1096,6 +1098,109 @@ grep -q 'dashboardtest.py' config/hooks/normal/1008-dclawos-agent-loop-test.hook
     echo "hook 1008 lacks the dashboardtest call" >&2
     exit 1
 }
+
+
+# Phase 6 module M5: GTK4 + libadwaita migration gate.
+# Gate-first document: docs/UI-FUNCTIONS.md is a REPO file (docs do
+# not ship in the ISO), checked from the source tree like the other
+# config/ greps above. It must exist, define its status vocabulary,
+# and contain NO residual unmapped status in any table row (the
+# negative grep targets table rows only; the vocabulary prose in
+# the document legitimately names the forbidden words).
+test -f docs/UI-FUNCTIONS.md || {
+    echo "docs/UI-FUNCTIONS.md missing (M5 function map)" >&2
+    exit 1
+}
+grep -q '状态词表' docs/UI-FUNCTIONS.md || {
+    echo "UI-FUNCTIONS lacks its status vocabulary" >&2
+    exit 1
+}
+if grep -E '^\|.*(待映射|未映射)' docs/UI-FUNCTIONS.md >/dev/null; then
+    echo "UI-FUNCTIONS has a residual unmapped table row (M5 incomplete)" >&2
+    exit 1
+fi
+grep -q 'GTK3-EXCEPTION: dclawos-shell' docs/UI-FUNCTIONS.md || {
+    echo "UI-FUNCTIONS lacks the taskbar GTK3 exception record" >&2
+    exit 1
+}
+# Migrated windows (extracted from the final image): each must pin
+# Gtk 4.0 + Adw 1 and must NOT pin Gtk 3.0; all must compile.
+for app in dclawos-settings dclawos-editor dclawos-monitor \
+        dclawos-takeover dclawos-approve dclawos-chat dclawos-dashboard; do
+    unsquashfs -d "$WORK/m5-$app" "$FS" "usr/local/bin/$app" >/dev/null 2>&1
+    src="$WORK/m5-$app/usr/local/bin/$app"
+    test -f "$src" || { echo "M5: $app missing from image" >&2; exit 1; }
+    python3 -m py_compile "$src"
+    grep -q '"Gtk", "4.0"' "$src" || {
+        echo "M5: $app does not pin Gtk 4.0" >&2; exit 1; }
+    grep -q '"Adw", "1"' "$src" || {
+        echo "M5: $app does not pin Adw 1" >&2; exit 1; }
+    if grep -q '"Gtk", "3.0"' "$src"; then
+        echo "M5: $app still pins Gtk 3.0" >&2; exit 1; fi
+    if grep -q 'WebKit2' "$src"; then
+        echo "M5: $app still references WebKit2" >&2; exit 1; fi
+done
+grep -q '"GtkSource", "5"' "$WORK/m5-dclawos-editor/usr/local/bin/dclawos-editor" || {
+    echo "M5: editor does not pin GtkSource 5" >&2; exit 1; }
+grep -q 'Adw.ApplicationWindow' "$WORK/m5-dclawos-settings/usr/local/bin/dclawos-settings" || {
+    echo "M5: settings shell is not an Adw.ApplicationWindow" >&2; exit 1; }
+for app in dclawos-chat dclawos-dashboard dclawos-settings; do
+    grep -q '"WebKit", "6.0"' "$WORK/m5-$app/usr/local/bin/$app" || {
+        echo "M5: $app host does not load WebKit 6.0" >&2; exit 1; }
+done
+# GTK3 exception list, machine-checked both ways: among ALL shipped
+# bins, exactly dclawos-shell (Wnck window) and dclawos-gui (Wnck
+# CLI coexistence pin) may pin Gtk 3.0 — matching UI-FUNCTIONS.
+unsquashfs -d "$WORK/m5-allbins" "$FS" usr/local/bin >/dev/null 2>&1
+gtk3_bins="$(grep -l '"Gtk", "3.0"' "$WORK/m5-allbins/usr/local/bin/"* 2>/dev/null \
+    | xargs -n1 basename 2>/dev/null | sort | tr '\n' ' ')"
+[ "$gtk3_bins" = "dclawos-gui dclawos-shell " ] || {
+    echo "M5: Gtk 3.0 exception set drifted: $gtk3_bins" >&2; exit 1; }
+grep -q '"Gdk", "3.0"' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
+    echo "M5: taskbar lost its Gdk 3.0 coexistence pin" >&2; exit 1; }
+# Package list: GTK4/Adw/SourceView5/WebKit6 present; the GTK3-era
+# WebKit/GtkSource packages gone.
+for pkg in gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+        gir1.2-gtksource-5 gir1.2-webkit-6.0; do
+    grep -qx "$pkg" config/package-lists/dclawos-desktop.list.chroot || {
+        echo "M5: package list lacks $pkg" >&2; exit 1; }
+done
+for pkg in gir1.2-webkit2-4.1 gir1.2-gtksource-4; do
+    if grep -qx "$pkg" config/package-lists/dclawos-desktop.list.chroot; then
+        echo "M5: package list still carries $pkg" >&2; exit 1; fi
+done
+for typelib in Gtk-4.0.typelib Adw-1.typelib GtkSource-5.typelib WebKit-6.0.typelib; do
+    grep -qE "(^|/)usr/lib/x86_64-linux-gnu/girepository-1.0/$typelib$" "$LIST" || {
+        echo "M5: typelib missing from final image: $typelib" >&2; exit 1; }
+done
+# GTK4 theme sheets ship, carry the palette, contain no pure black,
+# and keep token parity with the GTK3 sheets (taskbar exception).
+unsquashfs -d "$WORK/m5-theme4" "$FS" usr/share/dclawos/theme-gtk4.css \
+    usr/share/dclawos/theme-gtk4-dark.css >/dev/null 2>&1
+test -f "$WORK/m5-theme4/usr/share/dclawos/theme-gtk4.css"
+test -f "$WORK/m5-theme4/usr/share/dclawos/theme-gtk4-dark.css"
+python3 - "$WORK/m5-theme4/usr/share/dclawos/theme-gtk4.css" \
+    "$WORK/m5-theme4/usr/share/dclawos/theme-gtk4-dark.css" \
+    "$WORK/theme-extract/usr/share/dclawos/theme.css" <<'PYEOF'
+import re, sys
+def strip(text):
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+gtk4 = strip(open(sys.argv[1], encoding="utf-8").read())
+dark4 = strip(open(sys.argv[2], encoding="utf-8").read())
+gtk3 = strip(open(sys.argv[3], encoding="utf-8").read())
+assert gtk4.count("{") == gtk4.count("}"), "theme-gtk4.css braces unbalanced"
+assert "#000" not in gtk4, "theme-gtk4.css uses pure black"
+assert "#000" not in dark4, "theme-gtk4-dark.css uses pure black"
+for token in ("#f5f5f3", "#fcfcfb", "#1a1a19", "#3d5a80"):
+    assert token in gtk4, f"theme-gtk4.css lost palette token {token}"
+    assert token in gtk3, f"theme.css lost palette token {token}"
+for token in ("#0b0b0a", "#151515", "#20201e", "#f5f5f3"):
+    assert token in dark4, f"theme-gtk4-dark.css lost palette token {token}"
+PYEOF
+grep -q 'theme-gtk4.css' "$WORK/theme-extract/usr/local/lib/dclawos/theme.py" || {
+    echo "M5: theme.py does not know the GTK4 sheets" >&2; exit 1; }
+grep -q 'add_provider_for_display' "$WORK/theme-extract/usr/local/lib/dclawos/theme.py" || {
+    echo "M5: theme.py lacks the GTK4 provider path" >&2; exit 1; }
 
 # Initramfs must contain live-boot (the live session depends on it).
 
