@@ -1152,10 +1152,28 @@ done
 # bins, exactly dclawos-shell (Wnck window) and dclawos-gui (Wnck
 # CLI coexistence pin) may pin Gtk 3.0 — matching UI-FUNCTIONS.
 unsquashfs -d "$WORK/m5-allbins" "$FS" usr/local/bin >/dev/null 2>&1
-gtk3_bins="$(grep -d skip -l '"Gtk", "3.0"' "$WORK/m5-allbins/usr/local/bin/"* 2>/dev/null \
-    | xargs -n1 basename 2>/dev/null | sort | tr '\n' ' ')"
-[ "$gtk3_bins" = "dclawos-gui dclawos-shell " ] || {
-    echo "M5: Gtk 3.0 exception set drifted: $gtk3_bins" >&2; exit 1; }
+# (Implemented in python: the grep|xargs pipeline form exited 2
+# silently on the CI runner in runs #57/#58 — a directory entry
+# and/or a special file in the extracted bin dir — while passing
+# locally; the python form skips non-files, tolerates binaries,
+# and its result is printed verbatim on mismatch.)
+gtk3_bins="$(python3 -c '
+import os, sys
+hits = []
+for name in sorted(os.listdir(sys.argv[1])):
+    path = os.path.join(sys.argv[1], name)
+    if not os.path.isfile(path):
+        continue
+    try:
+        data = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        continue
+    if "\"Gtk\", \"3.0\"" in data:
+        hits.append(name)
+print(" ".join(hits))
+' "$WORK/m5-allbins/usr/local/bin")" || gtk3_bins="__collect_failed__"
+[ "$gtk3_bins" = "dclawos-gui dclawos-shell" ] || {
+    echo "M5: Gtk 3.0 exception set drifted: [$gtk3_bins]" >&2; exit 1; }
 grep -q '"Gdk", "3.0"' "$WORK/theme-shell/usr/local/bin/dclawos-shell" || {
     echo "M5: taskbar lost its Gdk 3.0 coexistence pin" >&2; exit 1; }
 # Package list: GTK4/Adw/SourceView5/WebKit6 present; the GTK3-era

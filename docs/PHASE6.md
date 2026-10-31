@@ -946,3 +946,13 @@ the per-window pins and every earlier M5 assertion had already
 passed against the real ISO); product code unchanged. Fix:
 `grep -d skip` so directories in the glob are skipped, in this
 follow-up commit — the P4-M4 gate-fix precedent.
+Gate-fix addendum (run #58): the `-d skip` form still exited 2
+silently at the same line on the CI runner (it passes locally;
+the extracted bin dir on the runner evidently contains an entry
+the grep pipeline chokes on). The check was rewritten in
+python (skip non-files, tolerate binaries, print the collected
+set verbatim on mismatch, `||` fallback so a collector failure
+becomes a readable mismatch instead of a silent exit 2). The
+assertion's intent and expected set are unchanged; the literal
+script snippet was executed locally against the source tree
+and collects exactly `dclawos-gui dclawos-shell`.
