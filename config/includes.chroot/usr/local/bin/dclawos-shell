@@ -83,12 +83,19 @@ def log(msg):
 
 
 def get_window_mode():
-    """Window mode from the DclawOS settings schema (module 3).
-
-    Returns 'fullscreen' or 'windowed'. Before module 3 installs the
-    schema, Gio.Settings raises and we fall back to 'fullscreen' (the
-    user-confirmed default), so no throwaway config format is needed.
+    """Window mode from the shared settings file (settingslib,
+    P5-M7; the settings GUI writes the same file). Returns
+    'fullscreen' or 'windowed'; any failure falls back to
+    'fullscreen' (the user-confirmed default). The old Gio.Settings
+    read stays as a last-resort fallback for a lib import failure.
     """
+    try:
+        import settingslib  # /usr/local/lib/dclawos is on sys.path
+        mode = settingslib.get_setting("window-mode")
+        if mode in ("fullscreen", "windowed"):
+            return mode
+    except Exception:
+        pass
     try:
         settings = Gio.Settings.new("org.dclawos.settings")
         mode = settings.get_string("window-mode")

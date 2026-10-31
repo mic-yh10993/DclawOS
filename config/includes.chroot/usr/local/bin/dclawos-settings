@@ -3,10 +3,23 @@
 
 Panels: General (window mode), AI & Model (provider / model / routing),
 Skills & MCP (unified registry, module 9).
-Every control writes DIRECTLY to the DclawOS GSettings schema — no HTTP
+Every control writes DIRECTLY to the DclawOS settings store — no HTTP
 API, no intermediate service (the user-confirmed "native direct"
-requirement, cards §3). The schema lives in
-org.dclawos.settings (compiled at image build time by hook 1002).
+requirement, cards §3).
+
+P5-M7 (user decision 2026-10-31, option B: "设置改存双方共读的配置
+文件"): the store is the SHARED settings file
+(/var/lib/dclawos/agent-settings.json) via settingslib — the same
+file the agent daemon reads, so what the human sets here is what
+the agent sees (GSettings is per-user dconf; the daemon could
+never see this app's writes). The org.dclawos.settings schema
+(compiled at image build time by hook 1002) remains ONLY as the
+first-run seed source: when the shared file is absent, main()
+seeds it from the current GSettings values, then the file is
+authoritative. The panels talk to a Gio.Settings-shaped adapter
+(SharedSettings below) so panel code is unchanged in shape; the
+window re-reads the file on focus-in, so agent-made changes
+(settings_set) show up without a restart.
 
 Reuse notes (evaluation cards §3, step 0 retrieval):
 - Panel organization (one page per panel, sidebar navigation) follows the
@@ -38,6 +51,11 @@ except ImportError:
     registrylib = None
 
 try:
+    import settingslib
+except ImportError:
+    settingslib = None
+
+try:
     import agentlib
 except ImportError:
     agentlib = None
@@ -53,6 +71,73 @@ CATALOG_PATH = "/usr/share/dclawos/engine/catalog.json"
 
 def log(msg):
     print(f"dclawos-settings: {msg}", flush=True)
+
+
+class SharedSettings:
+    """Gio.Settings-shaped adapter over settingslib (P5-M7).
+
+    Only the four accessors the panels use. The suspend flag makes
+    focus-refresh syncing write-free: pushing store values INTO
+    widgets fires their changed signals, whose handlers call
+    set_* — while suspended those calls are swallowed, so a
+    refresh can never echo a write back into the store.
+    """
+
+    def __init__(self):
+        self._suspended = False
+
+    def begin_sync(self):
+        self._suspended = True
+
+    def end_sync(self):
+        self._suspended = False
+
+    def get_string(self, key):
+        return settingslib.get_setting(key)
+
+    def get_boolean(self, key):
+        return bool(settingslib.get_setting(key))
+
+    def set_string(self, key, value):
+        if not self._suspended:
+            settingslib.set_setting(key, value)
+        return True
+
+    def set_boolean(self, key, value):
+        if not self._suspended:
+            settingslib.set_setting(key, bool(value))
+        return True
+
+
+def migrate_gsettings_once():
+    """First-run seed (P5-M7): when the shared settings file does
+    not exist yet, create it from the human's current GSettings
+    values (schema defaults when a key was never touched). After
+    this, the file is authoritative and GSettings is untouched.
+    Best effort throughout: any failure leaves defaults in charge
+    and is logged, never fatal to the GUI."""
+    try:
+        if settingslib.file_exists():
+            return
+    except Exception:  # noqa: BLE001 - best effort migration
+        return
+    seed = {}
+    try:
+        gio_settings = Gio.Settings.new(SCHEMA_ID)
+        for key in ("window-mode", "ai-provider", "ai-model",
+                    "routing-mode"):
+            seed[key] = gio_settings.get_string(key)
+        for key in ("taskbar-autohide", "ui-dark",
+                    "agent-full-access"):
+            seed[key] = gio_settings.get_boolean(key)
+    except Exception:  # noqa: BLE001 - schema absent: defaults seed
+        seed = {}
+    try:
+        if settingslib.seed(seed):
+            log("migrated GSettings values into the shared "
+                "settings file (one-time, P5-M7)")
+    except Exception as exc:  # noqa: BLE001 - logged, defaults apply
+        log(f"settings seed failed (defaults apply): {exc}")
 
 
 class SettingsApp(Gtk.Window):
@@ -86,6 +171,40 @@ class SettingsApp(Gtk.Window):
         stack.add_titled(self.build_skills_panel(), "skills", "Skills 与 MCP")
         stack.add_titled(self.build_secrets_panel(), "secrets", "密钥")
         stack.add_titled(self.build_channels_panel(), "channels", "渠道")
+        # P5-M7: the agent can change settings too (settings_set).
+        # Re-read the shared file whenever this window gains focus
+        # so agent-made changes appear without a restart. Writes
+        # are per-key read-modify-write on both sides, so a refresh
+        # never fights a concurrent edit of a different key.
+        self.connect("focus-in-event", self._on_focus_in)
+
+    def _on_focus_in(self, _window, _event):
+        self._refresh_from_store()
+        return False
+
+    def _refresh_from_store(self):
+        self.settings.begin_sync()
+        try:
+            if hasattr(self, "mode_combo"):
+                current = self.settings.get_string("window-mode")
+                self.mode_combo.set_active_id(
+                    current if current in ("fullscreen", "windowed")
+                    else "fullscreen")
+            if hasattr(self, "fa_switch"):
+                self.fa_switch.set_active(
+                    self.settings.get_boolean("agent-full-access"))
+            if hasattr(self, "dark_switch"):
+                self.dark_switch.set_active(
+                    self.settings.get_boolean("ui-dark"))
+            if hasattr(self, "routing_combo"):
+                current = self.settings.get_string("routing-mode")
+                self.routing_combo.set_active_id(
+                    current if current in ("auto", "manual") else "auto")
+            refresh_ai = getattr(self, "_refresh_ai", None)
+            if refresh_ai is not None:
+                refresh_ai()
+        finally:
+            self.settings.end_sync()
 
     def labeled_row(self, label_text, widget):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -112,6 +231,7 @@ class SettingsApp(Gtk.Window):
             "changed",
             lambda combo: self.settings.set_string(
                 "window-mode", combo.get_active_id() or "fullscreen"))
+        self.mode_combo = mode_combo
         box.pack_start(
             self.labeled_row("应用窗口模式", mode_combo), False, False, 0)
 
@@ -131,6 +251,7 @@ class SettingsApp(Gtk.Window):
             "notify::active",
             lambda sw, _pspec: self.settings.set_boolean(
                 "agent-full-access", sw.get_active()))
+        self.fa_switch = fa_switch
         box.pack_start(
             self.labeled_row("Agent 完全访问（无限制）", fa_switch),
             False, False, 0)
@@ -151,6 +272,7 @@ class SettingsApp(Gtk.Window):
             "notify::active",
             lambda sw, _pspec: self.settings.set_boolean(
                 "ui-dark", sw.get_active()))
+        self.dark_switch = dark_switch
         box.pack_start(
             self.labeled_row("深色界面", dark_switch), False, False, 0)
         dark_note = Gtk.Label(
@@ -239,6 +361,21 @@ class SettingsApp(Gtk.Window):
             box.pack_start(
                 self.labeled_row("AI 模型", model_combo),
                 False, False, 0)
+
+            def _refresh_ai():
+                # Focus refresh (P5-M7): pull the store's provider
+                # into the combos (adapter suspended by the caller,
+                # so the changed signals below write nothing back).
+                pid = self.settings.get_string("ai-provider")
+                if pid and pid not in providers_by_id and \
+                        provider_combo.get_active_id() != pid:
+                    provider_combo.prepend(
+                        pid, pid + "（未在目录中）")
+                if pid:
+                    provider_combo.set_active_id(pid)
+                refresh_models(pid)
+
+            self._refresh_ai = _refresh_ai
         else:
             provider = Gtk.Entry()
             provider.set_text(self.settings.get_string("ai-provider"))
@@ -258,6 +395,12 @@ class SettingsApp(Gtk.Window):
             box.pack_start(
                 self.labeled_row("AI 模型", model), False, False, 0)
 
+            def _refresh_ai():
+                provider.set_text(self.settings.get_string("ai-provider"))
+                model.set_text(self.settings.get_string("ai-model"))
+
+            self._refresh_ai = _refresh_ai
+
         routing = Gtk.ComboBoxText()
         routing.append("auto", "自动（路由引擎选择）")
         routing.append("manual", "手动（固定供应商与模型）")
@@ -268,6 +411,7 @@ class SettingsApp(Gtk.Window):
             "changed",
             lambda combo: self.settings.set_string(
                 "routing-mode", combo.get_active_id() or "auto"))
+        self.routing_combo = routing
         box.pack_start(
             self.labeled_row("路由模式", routing), False, False, 0)
 
@@ -914,19 +1058,17 @@ class SettingsApp(Gtk.Window):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
-        print("usage: dclawos-settings (writes org.dclawos.settings "
-              "directly)")
+        print("usage: dclawos-settings (writes the shared settings "
+              "file via settingslib, P5-M7)")
         return 0
-    try:
-        settings = Gio.Settings.new(SCHEMA_ID)
-    except Exception as exc:
-        print(f"dclawos-settings: schema {SCHEMA_ID} unavailable: {exc}",
-              file=sys.stderr)
-        print("dclawos-settings: the image build compiles this schema "
-              "(hook 1002); a missing schema means a broken image.",
+    if settingslib is None:
+        print("dclawos-settings: settingslib unavailable; the shared "
+              "settings store is missing, which means a broken image.",
               file=sys.stderr)
         return 1
-    log("dclawos-settings started (Phase 2 module 3: direct-write GUI)")
+    migrate_gsettings_once()
+    settings = SharedSettings()
+    log("dclawos-settings started (P5-M7: shared settings file GUI)")
     win = SettingsApp(settings)
     win.connect("destroy", Gtk.main_quit)
     win.show_all()

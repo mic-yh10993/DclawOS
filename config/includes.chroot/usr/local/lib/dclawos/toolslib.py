@@ -159,6 +159,27 @@ TOOL_SCHEMAS = [
             ("id", "license")),
     _schema("mcp_remove", "Remove a registered MCP server.",
             {"id": _STR}, ("id",)),
+    _schema("settings_get",
+            "Read DclawOS settings from the shared settings file "
+            "(the same file the Settings GUI writes). Omit key to "
+            "get all settings. Values are non-secret config.",
+            {"key": {"type": "string",
+                     "enum": ["window-mode", "taskbar-autohide",
+                              "ai-provider", "ai-model",
+                              "routing-mode", "ui-dark",
+                              "agent-full-access", "chaos-enabled"]}}),
+    _schema("settings_set",
+            "Change one DclawOS setting in the shared settings "
+            "file; the Settings GUI sees the new value. Needs "
+            "tier-2 approval. Human-only keys (agent-full-access, "
+            "chaos-enabled) are refused outright, even in "
+            "full-access mode.",
+            {"key": {"type": "string",
+                     "enum": ["window-mode", "taskbar-autohide",
+                              "ai-provider", "ai-model",
+                              "routing-mode", "ui-dark"]},
+             "value": {}},
+            ("key", "value")),
     _schema("channel_manage",
             "Manage messaging channels: action list, add (kind + "
             "optional allowlist; a human must still save the bot "

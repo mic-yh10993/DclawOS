@@ -7,8 +7,11 @@ executor + cost accounting live in the engine; this module owns the
 local concerns — settings, secrets, and the subprocess contract.
 
 Configuration (all local, GUI-managed; nothing calls a web UI):
-- Provider/model/routing-mode come from GSettings
-  org.dclawos.settings (the Settings AI panel writes them).
+- Provider/model/routing-mode come from the shared settings file
+  (settingslib, P5-M7): the Settings AI panel writes the same file
+  this service reads. (Before P5-M7 they were read via the
+  gsettings CLI, which as dclaw-agent saw only dclaw-agent's own
+  dconf defaults — the GUI's choices never arrived.)
 - API keys are secret files named llm-<provider> in the agent
   secrets dir (written via the Settings secrets page / broker,
   0600). They are read here, passed to dclawos-llm ONLY via the
@@ -32,25 +35,19 @@ SECRET_PREFIX = "llm-"
 CALL_TIMEOUT = 300
 
 
-def _gsettings(key):
-    try:
-        proc = subprocess.run(
-            ["gsettings", "get", "org.dclawos.settings", key],
-            capture_output=True, text=True, timeout=10)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ""
-    out = proc.stdout.strip()
-    if len(out) >= 2 and out[0] == "'" and out[-1] == "'":
-        out = out[1:-1]
-    return out
-
-
 def configured():
-    """Return {provider, model, mode} from settings ('' = unset)."""
+    """Return {provider, model, mode} from the shared settings
+    file ('' = unset). Any settings failure degrades to unset,
+    exactly like the old gsettings read failure did."""
+    try:
+        import settingslib  # local import (same dir)
+        values = settingslib.load_settings()
+    except Exception:  # noqa: BLE001 - unconfigured, not a crash
+        values = {}
     return {
-        "provider": _gsettings("ai-provider"),
-        "model": _gsettings("ai-model"),
-        "mode": _gsettings("routing-mode") or "auto",
+        "provider": values.get("ai-provider", ""),
+        "model": values.get("ai-model", ""),
+        "mode": values.get("routing-mode") or "auto",
     }
 
 

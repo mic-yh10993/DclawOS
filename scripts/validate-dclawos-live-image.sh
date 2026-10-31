@@ -278,8 +278,10 @@ grep -q 'connector_send' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.
     exit 1
 }
 # Phase 3 module 4: full-access toggle. The schema must carry the key
-# (agentlib reads it via the gsettings CLI) and the settings GUI must
-# wire it; the service itself never writes its own permission.
+# and the settings GUI must wire it; the service itself never writes
+# its own permission. (P5-M7: the value now lives in the shared
+# settings file — settingslib — which agentlib and the GUI both use;
+# the schema remains as the seed source / key inventory.)
 # (settings already extracted to $WORK/settings-extract by the
 # Phase 2 block above; reuse it, do not re-extract.)
 unsquashfs -d "$WORK/schema-extract" "$FS" usr/share/glib-2.0/schemas/org.dclawos.settings.gschema.xml >/dev/null 2>&1
@@ -289,6 +291,29 @@ grep -q 'agent-full-access' "$WORK/schema-extract/usr/share/glib-2.0/schemas/org
 }
 grep -q 'agent-full-access' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
     echo "settings does not wire agent-full-access" >&2
+    exit 1
+}
+# Phase 5 follow-up (P5-M7): shared settings store. The lib must be
+# packaged and valid, carry the denylist and the shared path, the
+# settings GUI must write through it, and the agent lib must expose
+# the settings tools (behavior is gated in-chroot by hook 1008's
+# settingstest; these are the static presence checks).
+unsquashfs -d "$WORK/settingslib-extract" "$FS" usr/local/lib/dclawos/settingslib.py usr/local/lib/dclawos/settingstest.py >/dev/null 2>&1
+python3 -m py_compile "$WORK/settingslib-extract/usr/local/lib/dclawos/settingslib.py" "$WORK/settingslib-extract/usr/local/lib/dclawos/settingstest.py"
+grep -q 'AGENT_DENIED_KEYS' "$WORK/settingslib-extract/usr/local/lib/dclawos/settingslib.py" || {
+    echo "settingslib lacks the agent denylist" >&2
+    exit 1
+}
+grep -q 'agent-settings.json' "$WORK/settingslib-extract/usr/local/lib/dclawos/settingslib.py" || {
+    echo "settingslib lacks the shared settings path" >&2
+    exit 1
+}
+grep -q 'settingslib' "$WORK/settings-extract/usr/local/bin/dclawos-settings" || {
+    echo "settings GUI does not write through settingslib" >&2
+    exit 1
+}
+grep -q 'settings_set' "$WORK/agentlib-extract/usr/local/lib/dclawos/agentlib.py" || {
+    echo "agent lib lacks the settings_set tool" >&2
     exit 1
 }
 # Phase 3 module 2: chat summon target + settings connectors/secrets

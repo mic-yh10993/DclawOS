@@ -24,7 +24,9 @@ Tools (see agentlib.classify for the approval tier of each):
   skill_run, subagent, takeover_request, connector_send,
   registry_list, skill_install, skill_remove, mcp_add,
   mcp_remove, channel_manage (Phase 5 WS2 self-provisioning:
-  provisioninglib, validated installs with rollback).
+  provisioninglib, validated installs with rollback),
+  settings_get, settings_set (P5-M7: the shared settings file,
+  settingslib; human-only keys refused before any ticket exists).
 Privileged operations go through the ticket broker (root daemon):
 the service never runs sudo itself and never holds privileges.
 
@@ -252,6 +254,35 @@ def _route_decide(params):
         raise ValueError("dclawos-route output not valid JSON")
 
 
+def _settings_get(params):
+    import settingslib
+    key = params.get("key")
+    if key is None:
+        return {"settings": settingslib.load_settings(),
+                "agent_denied_keys":
+                    sorted(settingslib.AGENT_DENIED_KEYS)}
+    if not isinstance(key, str):
+        raise ValueError("settings_get needs a string 'key'")
+    return {"key": key, "value": settingslib.get_setting(key)}
+
+
+def _settings_set(params, task):
+    import settingslib
+    key = params.get("key")
+    if not isinstance(key, str) or not key:
+        raise ValueError("settings_set needs a 'key'")
+    if "value" not in params:
+        raise ValueError("settings_set needs a 'value'")
+    # agent=True: the lib re-checks the human-only denylist (the
+    # execute_step pre-check is the first line, this is the second).
+    old = settingslib.set_setting(key, params["value"], agent=True)
+    new = settingslib.get_setting(key)
+    agentlib.log_event(
+        "settings", f"settings_set {key}: {old!r} -> {new!r}",
+        session=task.get("session", ""))
+    return {"key": key, "old": old, "new": new}
+
+
 def _takeover_request(params):
     import takeoverlib
     kind = params.get("kind", "other")
@@ -328,6 +359,21 @@ def execute_step(task, step):
     tool = step.get("tool")
     params = step.get("params") or {}
     tier, reason = agentlib.classify(tool, params)
+    if tool == "settings_set":
+        # Human-only settings keys fail closed BEFORE any ticket
+        # exists: no approval — and no full-access auto-approval —
+        # may let the agent set its own permission grant or its
+        # fault-injection switch (P5-M7, settingslib denylist).
+        import settingslib
+        _skey = params.get("key")
+        if isinstance(_skey, str) and settingslib.agent_denied(_skey):
+            agentlib.log_event(
+                "settings",
+                f"settings_set DENIED (human-only key): {_skey}",
+                session=task.get("session", ""))
+            raise ValueError(
+                f"settings_set: {_skey!r} is human-only; the agent "
+                f"can never set it")
     ticket_id = None
     if tier > 0:
         summary = f"{tool} {json.dumps(params, ensure_ascii=False)[:200]}"
@@ -387,6 +433,10 @@ def execute_step(task, step):
     if tool == "channel_manage":
         import provisioninglib
         return provisioninglib.channel_manage(params)
+    if tool == "settings_get":
+        return _settings_get(params)
+    if tool == "settings_set":
+        return _settings_set(params, task)
     if tool == "subagent":
         return _subagent(params, task)
     if tool == "cron":

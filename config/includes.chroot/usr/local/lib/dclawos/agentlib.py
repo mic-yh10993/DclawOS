@@ -21,9 +21,11 @@ Concepts (evaluation cards §5/§6/§7/§9, user-confirmed 2026-10-29/30):
   - tier 2 (ticket + explicit approval, never silent): deleting a
     file, any path outside the agent workspace (including the human
     home /home/dclaw, which the agent user cannot traverse anyway).
-  - full-access mode (GSettings org.dclawos.settings agent-full-access,
-    default false): tiers 1-2 are auto-approved but STILL ticketed and
-    logged for audit. Full access never skips the audit trail.
+  - full-access mode (shared settings file key agent-full-access,
+    default false; settingslib — the GUI and this service read the
+    SAME file since P5-M7, user decision 2026-10-31 option B):
+    tiers 1-2 are auto-approved but STILL ticketed and logged for
+    audit. Full access never skips the audit trail.
 - Approval flow: the service creates a ticket (ticketlib), then polls
   its status until approved/denied/expired/timeout. The human approves
   in dclawos-approve; the CLI approve command stays test-only.
@@ -54,7 +56,6 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import time
 
 TASKS_DIR_DEFAULT = "/var/lib/dclawos/tasks"
@@ -80,6 +81,8 @@ TOOLS = (
     # Phase 5 WS2: self-provisioning (provisioninglib).
     "registry_list", "skill_install", "skill_remove",
     "mcp_add", "mcp_remove", "channel_manage",
+    # Phase 5 follow-up (P5-M7): shared settings file (settingslib).
+    "settings_get", "settings_set",
 )
 
 
@@ -230,17 +233,18 @@ def next_queued_task():
 def full_access_enabled():
     """Read the full-access toggle (module 4 GUI writes it).
 
-    Via the gsettings CLI so this module stays gi-free. Any failure
-    (missing schema, missing binary) means full access OFF.
+    P5-M7: read from the SHARED settings file (settingslib) — the
+    GUI writes the same file, so the toggle the human flips is the
+    toggle this service sees. (Before, this ran the gsettings CLI
+    as dclaw-agent, which reads dclaw-agent's OWN dconf database:
+    always the default, i.e. the GUI toggle never reached the
+    daemon.) Any failure means full access OFF.
     """
     try:
-        proc = subprocess.run(
-            ["gsettings", "get", "org.dclawos.settings",
-             "agent-full-access"],
-            capture_output=True, text=True, timeout=10)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        import settingslib  # local import, same pattern as ticketlib
+        return bool(settingslib.get_setting("agent-full-access"))
+    except Exception:  # noqa: BLE001 - fail closed to OFF
         return False
-    return proc.stdout.strip() == "true"
 
 
 def _is_under(path, prefix):
@@ -322,6 +326,14 @@ def classify(tool, params):
         if params.get("action") == "list":
             return 0, "listing channels is read-only"
         return 2, "channel management arms a message ingress path"
+    if tool == "settings_get":
+        return 0, "settings are non-secret config; read is free"
+    if tool == "settings_set":
+        # Tier 2 even though some keys are cosmetic: the same tool
+        # can repoint the model provider. Human-only keys are NOT a
+        # tier question — settingslib.AGENT_DENIED_KEYS refuses them
+        # before any ticket exists (daemon execute_step + the lib).
+        return 2, "changing shared system settings mutates state"
     if tool in ("service_restart", "package_install"):
         return 1, "system mutation via broker"
     if tool in ("mcp_call", "skill_run", "connector_send"):

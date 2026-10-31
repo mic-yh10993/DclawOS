@@ -83,7 +83,7 @@ set its token — recorded as a deliberate boundary in the audit).
 | W2.1 | skill_install / skill_remove (local path or git URL; license+provenance recorded; validate then register) | CLOSED (P5-M4): sources = local dir, local .tar.gz/.zip, http(s) archive URL, git URL (git packaged in base set). Package must contain SKILL.md + a runnable command (param, or scripts/run.sh / skill.py / index.js); single wrapping dir flattened. License REQUIRED (refused without); staged validation → land in skills-store → register once; any failure leaves no entry and no payload. skill_remove deletes the payload ONLY for agent-installed store entries. Tier 2. Installed skills are immediately runnable via skill_run (gate-verified end to end) |
 | W2.2 | mcp_add / mcp_remove (stdio command or URL; MUST pass a live MCP initialize+tools/list handshake before the entry is kept) | CLOSED (P5-M4): mcpclient gained a Streamable HTTP transport (Mcp-Session-Id, JSON or SSE-framed replies; env = headers for HTTP entries) + validate_server(). mcp_add registers NOTHING until initialize + tools/list succeed against the real server; the returned tool list is reported. Env guard: literal values for secret-looking keys are refused (secret:<name> references only). Tier 2. Gate: provisiontest handshakes a tiny stdio server AND a mock HTTP server, and calls tools on both |
 | W2.3 | channel_manage (enable/disable, allowlist edit; no token writes) | CLOSED (P5-M4): actions list (tier 0) / add / remove / enable / disable / set_allowlist (tier 2). add records the conventional secret name channel-<id> + accepts adapter options (channel_id, homeserver…); the result reports token_configured — the token itself can never be set or read through the tool |
-| W2.4 | Remaining audit gaps (per audit table; each row named) | CLOSED with named dispositions (P5-M4): registry_list built (tier 0, env redacted — literals shown as <set>, only secret: refs readable). settings_set BLOCKED-NAMED: GSettings is per-user dconf — Settings writes as the human user, the daemon reads as dclaw-agent; a daemon-side `gsettings set` would land in a database the GUI never reads = fake implementation. Needs a config-channel decision (broker set-setting op vs a shared config file) — recorded, not faked. G-18 (a general gui tool) EVALUATED, not built: dclawos-gui exists but wiring arbitrary GUI actuation as a tool would bypass the takeover path for credential-class operations; GUI work goes through takeover_request by design. G-17 no gap (subagent + cron). G-20 covered by write_file tier 2. TWO AUDIT-FOUND BUGS FIXED in this module: (1) broker param-name mismatch — model schemas say {name}, the broker wants {unit}/{package}; daemon dispatch now translates (model-issued service/package calls previously failed); (2) shell delete commands (rm/rmdir/unlink/shred argv) classified tier 1 although the privilege model says deleting is tier 2 — now tier 2 (obvious argv shapes; not a shell parser). Plus the stale dclawos-privileged header corrected (it claimed package-install was refused; 5 ops since Phase 3) |
+| W2.4 | Remaining audit gaps (per audit table; each row named) | CLOSED with named dispositions (P5-M4): registry_list built (tier 0, env redacted — literals shown as <set>, only secret: refs readable). settings_set: was BLOCKED-NAMED (GSettings is per-user dconf — Settings writes as the human user, the daemon reads as dclaw-agent; a daemon-side `gsettings set` would land in a database the GUI never reads = fake implementation). **CLOSED in P5-M7 via option B** — see the P5-M7 section below; user decision recorded there. G-18 (a general gui tool) EVALUATED, not built: dclawos-gui exists but wiring arbitrary GUI actuation as a tool would bypass the takeover path for credential-class operations; GUI work goes through takeover_request by design. G-17 no gap (subagent + cron). G-20 covered by write_file tier 2. TWO AUDIT-FOUND BUGS FIXED in this module: (1) broker param-name mismatch — model schemas say {name}, the broker wants {unit}/{package}; daemon dispatch now translates (model-issued service/package calls previously failed); (2) shell delete commands (rm/rmdir/unlink/shred argv) classified tier 1 although the privilege model says deleting is tier 2 — now tier 2 (obvious argv shapes; not a shell parser). Plus the stale dclawos-privileged header corrected (it claimed package-install was refused; 5 ops since Phase 3) |
 | W2.5 | Settings GUI reflects agent-side changes (single registry file, two writers — already true by construction; verified in gate) | CLOSED (P5-M4): one registry file; every runtime parser re-reads it per call (no daemon restart needed); Settings re-reads on panel refresh. provisiontest exercises agent-side writes through the same registrylib the GUI uses |
 
 ## WS3 — Frontend quality (the 10 iron rules)
@@ -112,6 +112,7 @@ palette alignment).
 | P5-M4 WS2 self-provisioning (provisioninglib, HTTP MCP, audit fixes) | 4124af3 + 1cf752d (fix) | 41097319110 (#46) | success — #45 (41096427145) failed at the gate: provisiontest hit Python 3.12-only tarfile filter= on bookworm's 3.11; product fixed with a portable hand-rolled safe extraction (1cf752d), hostile-archive case re-verified |
 | P5-M5 WS3 UI craft (theme system, dark variant, per-app application) | 54504a0 | 41099855681 (#47) | success (release dclawos-2.0-preview-47, ISO 1,060,050,944 B) |
 | P5-M6 close-out (ledger finalisation, this note) | (this commit) | — | pending |
+| P5-M7 settings_set via shared config file (option B) | (this commit) | — | pending |
 
 ## Unverified / honesty boundary
 
@@ -127,9 +128,9 @@ palette alignment).
 All three workstreams are landed and build-verified: WS1 four
 adapters CLOSED with three channels BLOCKED-NAMED and two
 EVALUATED-FEASIBLE-deferred (W1.6); WS2 six tools CLOSED with
-settings_set BLOCKED-NAMED (needs a config-channel decision:
-broker set-setting op vs shared config file — a product call,
-not an implementation gap) and the human-only set recorded at
+settings_set at the time BLOCKED-NAMED pending a config-channel
+decision (closed later by P5-M7, option B — see below) and the
+human-only set recorded at
 W2.0; WS3 all ten rules LANDED or CODE with per-rule deviations
 in docs/UI-RULES.md. Unchanged unverified layers from earlier
 phases: Calamares install success, real-provider LLM replies
@@ -137,3 +138,60 @@ phases: Calamares install success, real-provider LLM replies
 The M4 row carries the phase's one red build (#45) — the gate
 caught a real Python-version portability bug in product code;
 the fix is the module's second commit.
+
+## P5-M7 — settings_set via shared config file (follow-up module)
+
+**Decision**: the user chose option B on 2026-10-31 (chat),
+verbatim: "B：设置改存双方共读的配置文件" (settings move to a
+config file both sides read). The broker set-setting option (A)
+was NOT taken. This closes the W2.4 settings_set BLOCKED-NAMED row.
+
+**What landed** (`settingslib.py`, single implementation, both
+sides): the store is `/var/lib/dclawos/agent-settings.json`
+(group `dclawos-session`, 0660, flock + per-key read-modify-write
++ atomic rename — the registry/tasks sharing pattern). The path
+and the `chaos-enabled` key predate the module: the engine's
+qualityStore chaos gate already read exactly this file, so the
+chaos consumer migrated with zero engine changes. Key inventory
+(= KEY_SPECS): the seven org.dclawos.settings schema keys +
+chaos-enabled, all type/enum-validated; unknown keys rejected on
+write, wrong-typed stored values fall back per-key, a corrupt
+file falls back to all defaults (logged; next write sets it
+aside as `.corrupt`) — no reader ever crashes.
+
+**Migration**: on first run the settings GUI seeds the file from
+the human's current GSettings values (defaults where untouched);
+after that the file is authoritative and the GSettings schema
+remains only as seed source / key inventory documentation (hook
+1002 still compiles it). All former readers switched to the lib:
+GUI (via a Gio-shaped adapter + focus-in refresh, so agent-made
+changes appear without restart), agentlib.full_access_enabled,
+llmlib.configured (provider/model/routing), theme ui-dark,
+dclawos-shell window-mode. This also fixes the latent Phase 3/4
+bug the audit implied: the daemon's gsettings reads saw
+dclaw-agent's own dconf (always defaults), so the GUI's
+full-access toggle and AI choices never reached the daemon.
+
+**Tools**: settings_get (tier 0) / settings_set (tier 2) wired
+through toolslib + agentlib.TOOLS/classify + daemon dispatch.
+**Denylist (hard boundary)**: `agent-full-access` and
+`chaos-enabled` are human-only — refused in execute_step BEFORE
+any ticket exists (so full-access auto-approval cannot reach
+them), re-checked in the lib (agent=True), attempts logged to
+the event stream; successful sets log key + old→new. (Approval
+tiers are not settings — they are hardcoded in classify, so no
+tier-policy key exists to deny. Secrets are not settings either:
+tokens stay in the broker's 0600 files.)
+
+**Exceptions (named)**: none for keys — all eight keys live in
+the shared file. The GSettings schema is retained solely as the
+seed source above. Concurrency semantics: last-writer-wins PER
+KEY (both sides re-read before writing one key), documented in
+settingslib.
+
+**Gate**: hook 1008 runs settingstest.py — lib round trips,
+denylist, validation, corrupt fallback, daemon dispatch fns, and
+a required two-user simulation (dclaw-agent writes → dclaw
+reads/writes back → unrelated user `nobody` cannot open the
+file). Validate script asserts the lib, the denylist and the
+GUI/daemon wiring statically.

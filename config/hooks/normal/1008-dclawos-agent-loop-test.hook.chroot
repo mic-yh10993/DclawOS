@@ -36,3 +36,15 @@ python3 /usr/local/lib/dclawos/channeltest.py
     exit 1
 }
 python3 /usr/local/lib/dclawos/provisiontest.py
+
+# Phase 5 follow-up (P5-M7): shared settings store gate. settingslib
+# round trips (daemon-side write -> GUI-side read via the same lib),
+# the settings_set denylist, validation, corrupt-file fallback, and
+# — required here, since the chroot has both users — the two-user
+# permission simulation (dclaw-agent <-> dclaw, nobody locked out).
+[ -f /usr/local/lib/dclawos/settingstest.py ] || {
+    echo "dclawos-settingstest: test script missing" >&2
+    exit 1
+}
+DCLAWOS_SETTINGSTEST_REQUIRE_SIM=1 \
+    python3 /usr/local/lib/dclawos/settingstest.py

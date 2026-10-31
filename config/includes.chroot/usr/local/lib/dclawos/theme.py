@@ -4,8 +4,8 @@
 One small module every DclawOS GTK window app imports: it loads
 the shared stylesheet (/usr/share/dclawos/theme.css) through a
 Gtk.CssProvider, falling back to an embedded copy of the same CSS
-when the file is missing. When the GSettings key
-org.dclawos.settings ui-dark is true, the dark variant
+when the file is missing. When the shared settings file key
+ui-dark is true (settingslib, P5-M7), the dark variant
 (theme-dark.css, same fallback pattern) is appended after the
 base sheet. It NEVER raises: any failure returns False and the
 app keeps its default look. A theme failure must never break an
@@ -41,8 +41,7 @@ import os
 
 CSS_PATH = "/usr/share/dclawos/theme.css"
 DARK_CSS_PATH = "/usr/share/dclawos/theme-dark.css"
-SCHEMA_ID = "org.dclawos.settings"
-DARK_KEY = "ui-dark"
+DARK_KEY = "ui-dark"  # shared settings file key (settingslib)
 
 # Embedded copies of theme.css / theme-dark.css (kept in sync by
 # hand; the files win when present). Duplication is intentional:
@@ -263,12 +262,11 @@ def _read_css(path, fallback):
 
 
 def _dark_preferred():
-    """ui-dark via Gio.Settings; False on any problem."""
+    """ui-dark from the shared settings file (settingslib, P5-M7);
+    env override as fallback; False on any problem."""
     try:
-        import gi
-        gi.require_version("Gio", "2.0")
-        from gi.repository import Gio
-        return bool(Gio.Settings.new(SCHEMA_ID).get_boolean(DARK_KEY))
+        import settingslib  # same lib dir as this module
+        return bool(settingslib.get_setting(DARK_KEY))
     except Exception:
         return os.environ.get("DCLAWOS_UI_DARK") == "1"
 
