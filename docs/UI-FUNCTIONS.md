@@ -104,6 +104,7 @@ GTK4 已删除 `.run()`），文件选择用 `get_file().get_path()`
 | 接管窗：请求列表定时刷新（1s POLL——M1 推送化未覆盖此窗，现状保留并在此登记） | P2-M6 / GLib.timeout_add(POLL_MS) | dclawos-takeover（GTK4）保留现状；推送化改造不在 M5 授权内 | 已映射-GTK4 |
 | 审批窗（独立）：待审批票据列表（操作/摘要/时间，只显示摘要不显示密钥） | P3-M1 / dclawos-approve ApproveApp、list_pending | dclawos-approve（GTK4/Adw）保留并迁移 | 已映射-GTK4 |
 | 审批窗（独立）：批准/拒绝（写 status/approved_by=human-gui/approved_at，与 chatlib.apply_verdict 字段一致） | P3-M1 / on_verdict | dclawos-approve（GTK4）逐项保留 | 已映射-GTK4 |
+| 审批窗（独立）：票据列表定时刷新（2s POLL——M1 推送化未覆盖此窗，现状保留；M6 关账时据源码 POLL_MS=2000 补登记，此前本表漏记） | P3-M1 / GLib.timeout_add(POLL_MS) | dclawos-approve（GTK4）保留现状；推送化改造不在 M5/M6 授权内 | 已映射-GTK4 |
 | 审批窗的现行调用关系（盘点结论）：主路径已被 M3 聊天内联卡片与 M4 看板覆盖层覆盖；但 dashboardlib.LAUNCH_TARGETS 仍有 approve→dclawos-approve 启动项，且 agentlib 台账称其为生产审批路径、设置页密钥/渠道保存的审批靠请求方轮询票据状态——故它是仍在用的兜底入口，不是死代码 | P6-M4 / dashboardlib LAUNCH_TARGETS；agentlib.request_approval | 保留二进制并迁 GTK4（不删除、不降级为取代） | 已映射-GTK4 |
 | 聊天页：会话列表/切换/新建（convlib 转录）+ 历史渲染 | P6-M3 / chat.html、chatlib（chat.state/switch/new/history） | dclawos-chat 宿主（GTK4+WebKit6）+ chat.html 不变 | 已映射-WebView |
 | 聊天页：发送消息建 llm 任务、真流式气泡（铁律4 原生 blur 晕开）、最终回复对账替换不重复 | P6-M3 / chat.send、llmlib.call_stream、守护进程 delta 推送 | 同上（桥与页面不变、宿主换代） | 已映射-WebView |

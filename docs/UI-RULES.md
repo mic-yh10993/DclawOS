@@ -3,13 +3,22 @@
 User directive (2026-10-31, verbatim, binding for every shipped
 page): 「各个页面协调点，高质量丝滑一些，按大厂质感写前端，严守10条铁律」
 
-The shipped frontend is GTK3 (`theme.py` + `theme.css`, Phase 3
-module 7). The rules are written in web-CSS vocabulary; this file
-is the binding translation: rule → exact user wording → GTK
-implementation → platform deviation (honest, minimal). A rule is
-never silently skipped: where GTK3 cannot express the web
-primitive, the nearest equivalent is implemented in code and the
-gap is written here.
+Frontend reality (Phase 6 close-out, M6): the shipped frontend
+is HYBRID. The base is GTK4+libadwaita (`theme.py` dual-generation
++ `theme-gtk4.css` / `theme-gtk4-dark.css`, Phase 6 M5); the three
+high-interaction pages — model settings (M2), chat (M3),
+dashboard (M4) — are local WebView pages (`model-settings.html` /
+`chat.html` / `dashboard.html`, hosts on WebKitGTK 6.0 since M5)
+where the rules are written in their native web form; the taskbar
+(`dclawos-shell`) is the single named GTK3 exception (Wnck has no
+GTK4 equivalent) and keeps the original GTK3 mapping below on
+`theme.css` / `theme-dark.css`. The per-rule sections below are
+the original Phase 5 GTK3 mapping, kept as the historical record
+and as the taskbar's live mapping; the M5 addendum and the M6
+close-out table at the end of this file are the current status of
+record per surface. A rule is never silently skipped: where a
+platform cannot express the web primitive, the nearest equivalent
+is implemented in code and the gap is written here.
 
 Status vocabulary: LANDED (in theme/apps + gate-asserted) ·
 CODE (implemented in code, presentation-only, not gate-visible) ·
@@ -83,10 +92,15 @@ never a drawn border in a contrasting colour.
   primitive in GTK3); alpha ramp is the nearest equivalent.
   Very long replies batch characters per tick so total reveal
   stays ≤ ~4 s; within a batch every character still gets its
-  own 90 ms ramp. The model path itself is non-streaming
-  (Phase 4 boundary, unchanged); this rule governs the reveal
-  presentation of the completed reply.
-- Status: CODE (P5-M5, chat window).
+  own 90 ms ramp. (Phase 6 M6 note: the Phase 4 non-streaming
+  boundary this paragraph originally cited ended with M3 — the
+  model path is true streaming for openai/passthrough since M3,
+  and the chat surface itself moved to the WebView page, where
+  this rule is native; the alpha ramp above survives only as the
+  legacy `stream_reveal` helper in theme.py, which no shipped
+  window calls since M3. See the M6 close-out table.)
+- Status: CODE (P5-M5, chat window; superseded per-surface by
+  the M6 close-out table at the end of this file).
 
 ### 5. 行内图标：vertical-align:-0.125em对齐中心。
 - GTK: GTK CSS has no `vertical-align` for images.
@@ -211,3 +225,35 @@ a GTK4 column here:
 - Rules 9/10 (motion + self-extinguishing feedback):
   `theme.flash_feedback` is widget-API-compatible with GTK4
   (label swap + opacity pulse + 2500 ms restore) and unchanged.
+
+## Phase 6 M6 close-out — hybrid-reality status table (status of record)
+
+Verified against the shipped code at the Phase 6 close (M5,
+fa0378b): the three WebView pages' embedded CSS
+(`model-settings.html`, `chat.html`, `dashboard.html`),
+`theme-gtk4.css` / `theme-gtk4-dark.css` (GTK4 side),
+`theme.css` / `theme-dark.css` (GTK3 taskbar side), and the
+helpers in `theme.py`. Every cell carries exactly one of three
+statuses: 逐字实现 (verbatim) / 近似 (approximation, gap
+stated) / 不适用 (not applicable, reason stated). No rule is
+deleted and no approximation is written as verbatim.
+
+| # | Rule | WebView pages | GTK4+Adwaita native windows | GTK3 exception (taskbar, dclawos-shell) |
+|---|---|---|---|---|
+| 1 | 去边框、1–3% 微明度分层、禁 #000、指定调色板 | 逐字实现 — 三页 `:root`/`body.dark` 逐字使用浅色 #f5f5f3/#fcfcfb、暗色 #0b0b0a/#151515/#1a1a19/#20201e，`border:none` + inset 发丝线分层，三页均无 #000（门禁断言） | 逐字实现 — theme-gtk4.css / theme-gtk4-dark.css 与 GTK3 表同字面 token（validate M5 块断言双代际 token 一致 + 无 #000），分层同为 inset hairline/box-shadow 手法 | 逐字实现 — theme.css / theme-dark.css 同 token，经 `.dclawos-taskbar` 类作用域应用，几何（48px/strut）不动 |
+| 2 | 聚焦无 outline、双环 box-shadow | 逐字实现 — 三页均为 `outline:none` + `box-shadow: inset 0 0 0 1px accent, 0 0 0 3px ring` 双环 | 近似 — GTK CSS 没有 outline 属性可关（无 outline 可禁），聚焦只以同一双环 box-shadow 表达、不改 border；差距：combobox 的环落在整个控件而非内嵌输入区（沿 Phase 5 注记） | 近似 — 同 GTK4 理由，旧映射（theme.css 同 token） |
+| 3 | 暗色字重全降 40（400→360、600→560、700→660） | 逐字实现 — 三页 `body.dark` 逐字写 font-weight:360（正文）、560（标题/按钮）；三页未使用 700 字重角色，故无 660 落点 | 近似 — theme-gtk4-dark.css 已编码 360/560/660 请求值；差距：出厂字体（Noto Sans CJK / DejaVu）非可变字体，Pango 将请求取整到最近实字面，渲染数值不达 360/560/660（请求正确、效果待可变字体） | 近似 — 同上，旧映射（theme-dark.css 同请求值、同取整差距） |
+| 4 | 流式打字 90ms blur(6px)→清晰、bezier(.215,.61,.355,1)、30ms 错开 | 聊天页：逐字实现（`@keyframes reveal` 90ms blur(6px)→clear、同缓动、30ms 错开、每 24 字循环使长 delta 立即开始）；看板页：逐字实现（限 llm 流式行，同 keyframe；非流式行按规则本义普通呈现）；模型设置页：不适用（页面无流式文本面，M2 台账已登记） | 不适用 — GTK4 窗口已无流式文本面（聊天/看板均已迁 WebView）；theme.py 仍保留 alpha-ramp 近似助手 `stream_reveal`（90ms 内 alpha .25→.6→1.0 代替 blur，GTK 无字形 blur 原语），但自 M3 起无任何窗口调用它，属遗留代码、不是现行落地 | 不适用 — 任务栏无流式文本面（时钟/状态为静态或整段更新标签） |
+| 5 | 行内图标 vertical-align:-0.125em | 逐字实现 — 三页均有 `svg.ic{vertical-align:-0.125em}`（看板页为 `svg.ic,.ic`） | 近似 — GTK CSS 无 vertical-align；`theme.inline_icon` 以 16px pixel-size + valign CENTER 按控件盒对齐，差距：非 em 基线对齐；且 GTK 窗口几乎全为文本标签，应用点少 | 近似 — 同一双代际共用助手；任务栏基本无行内图标应用点 |
+| 6 | tabular-nums 数字等宽 | 逐字实现 — 三页均有 `.num,.numeric{font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1}` | 逐字实现 — theme-gtk4.css `.numeric` 类同声明 + `theme.apply_tnum` 代码助手（监视窗状态读数等在用） | 逐字实现 — theme.css `.numeric` 同声明；任务栏时钟/电量标签经 `theme.apply_tnum` 应用（dclawos-shell 源码实证） |
+| 7 | Grid 0fr→1fr 丝滑折叠（免算高） | 逐字实现 — 三页均用 `display:grid; grid-template-rows:0fr→1fr` 过渡（模型页卡片折叠、聊天页指派表单、看板页接管横幅） | 近似 — GTK 无 CSS grid rows；以 Gtk.Revealer（SLIDE_DOWN、布局驱动高度、应用代码不测高）实现同一意图（theme.make_section 的 GTK4 分支，设置页注册表分区在用），差距：原语不同（revealer ≠ grid rows） | 不适用 — 任务栏自身无折叠面；Revealer 近似映射在共用 theme.py 助手中（旧 GTK3 时代落在设置页，该页已迁 GTK4） |
+| 8 | text-wrap:pretty 防孤字 | 逐字实现 — 三页均有 `p,.prose{text-wrap:pretty; max-width:68ch}` | 近似 — Pango/GtkLabel 无 pretty/balanced 换行模式；`theme.apply_prose` 以 wrap-mode WORD_CHAR + 约 68 字符行宽上限（+短标题居中）近似（设置页/监视窗说明文字在用），差距：近似而非该特性本身 | 近似 — 同一助手旧映射；任务栏正文量极少（标签类） |
+| 9 | 动效性格：过阻尼 (1200/80) 零回弹 / 欠阻尼 (380/18) 微弹 | 近似 — Web CSS 同样没有弹簧求解器，数值弹簧参数 (1200/80、380/18) 在任何 CSS 面都无法逐字落地；三页以 cubic-bezier(.215,.61,.355,1) 表达过阻尼 settle（零回弹）、以 cubic-bezier(.34,1.8,.64,1) 的 .38s scale pulse 表达欠阻尼微弹，差距：性格等价、参数非逐字 | 近似 — GTK 无弹簧求解器且不能缩放控件；过阻尼侧用同一 bezier 过渡，欠阻尼侧由 `theme.flash_feedback` 以 opacity 脉冲（1→.55→1，90ms 步、一次过冲）替代 scale 微弹（编辑器保存反馈在用），差距：通道替换（opacity 代 scale） | 近似 — 旧映射同上（共用 theme.py 助手与 theme.css 过渡 token）；任务栏内无拖拽/点赞类应用点，规则以主题 token 形式存在 |
+| 10 | 反馈 2.5s 自熄 | 逐字实现 — 三页反馈（toast / 复制对勾）均由 2500ms 定时自熄（模型页 toast、聊天页复制对勾+toast、看板页 toast） | 逐字实现 — 时长逐字：`theme.flash_feedback` 精确 2500ms 后恢复（编辑器保存状态在用）；设置页密钥保存状态以自有 GLib.timeout_add(2500) 清除（其伴随脉冲属铁律 9 的近似，不影响本条时长口径） | 不适用 — 任务栏无复制/保存类反馈面 |
+
+Reading note: the LANDED / CODE / DEVIATION statuses in the
+per-rule sections above describe the Phase 5 GTK3-only reality
+they were written in. Where they differ from this table, this
+table governs: it is the only place that states all three
+surfaces (WebView / GTK4 / GTK3 exception) side by side, and it
+was re-verified line by line against the code at M6.

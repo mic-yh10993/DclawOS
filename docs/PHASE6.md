@@ -682,7 +682,10 @@ presence must not be mistaken for a poll.
   for the P0 / usability stage — it needs a ticket-model
   extension (scoped grant record + broker/agentlib honouring
   it) before any UI may offer it. (This record lives in this
-  ledger; the repo has no docs/UI-FUNCTIONS.md file.)
+  ledger; M6 note: at M4 time the repo had no
+  docs/UI-FUNCTIONS.md — M5 created that file and carries the
+  same queue record as a 未实现-已排队 row there, so the record
+  now lives in both places.)
 
 ### Bridge verbs (dashboard surface, M4)
 
@@ -761,17 +764,12 @@ chat page). No other deviation.
 
 ## Module ledger
 
-| Module | Commit | Run | Result |
-|---|---|---|---|
-| P6-M1 event bus + live output + task wake + bridge core | (this commit) | — | pending |
-| P6-M2 model settings complete (WebView + routing wiring + usage ledger) | (this commit) | — | pending |
-| P6-M3 chat WebView + true streaming (SSE openai/passthrough, staged claude) | (this commit) | — | pending |
-| P6-M4 dashboard WebView + taskbar agent state + approval overlay | (this commit) | — | pending |
-| P6-M5 GTK4+libadwaita migration + UI-FUNCTIONS gate | (this commit) | — | pending |
-
-## Later modules (not started)
-
-- M5 GTK4 migration, M6 close-out.
+Superseded at close-out: the per-module rows originally kept
+here (all "pending") are replaced by the verified
+**Phase 6 总台账** in the M6 close-out section at the end of
+this file (commits / runs / releases / ISO bytes, all checked
+against the GitHub API and the release assets at M6). The
+module sections above and below remain the technical record.
 
 ## M5 — GTK4 + libadwaita migration & function-map gate
 
@@ -956,3 +954,142 @@ becomes a readable mismatch instead of a silent exit 2). The
 assertion's intent and expected set are unchanged; the literal
 script snippet was executed locally against the source tree
 and collects exactly `dclawos-gui dclawos-shell`.
+
+## M6 — Close-out （关账）
+
+State: **CLOSED**. Documentation close-out only: this module
+changes no product code. Every number below was re-checked at
+M6 against the GitHub API (workflow runs) and the release
+assets (ISO byte counts) — not copied from the per-module
+draft rows.
+
+### Phase 6 总台账 (master ledger)
+
+Baseline before Phase 6: commit 5ee669c, run 41153538403
+(#50) success, release dclawos-2.0-preview-50, ISO
+1,060,083,712 bytes.
+
+| Module | Commit(s) | Run | Conclusion | Release | ISO (bytes) |
+|---|---|---|---|---|---|
+| M1 event bus + live output + task wake + bridge core | b8d00c3 | 41155565705 (#51) success | CLOSED | dclawos-2.0-preview-51 | 1,060,132,864 |
+| M2 model settings complete (WebView + routing wiring + usage ledger) | 8243252 | 41157940464 (#52) success | CLOSED | dclawos-2.0-preview-52 | 1,138,573,312 |
+| M3 chat WebView + true streaming | f2fb68f | 41160534403 (#53) success | CLOSED | dclawos-2.0-preview-53 | 1,138,630,656 |
+| M3 correction (no-key short-circuit in call_stream; 10:27 incident fix — see the archive line below) | b6e9b3a | 41162106261 (#54) success | CLOSED | dclawos-2.0-preview-54 | 1,138,630,656 |
+| M3.1 same short-circuit for the non-streaming call() | 1bb33f7 | 41163678253 (#55) success | CLOSED | dclawos-2.0-preview-55 | 1,138,636,800 |
+| M4 dashboard WebView + taskbar agent state + approval overlay | 4a30c86 | 41165377262 (#56) success | CLOSED | dclawos-2.0-preview-56 | 1,138,657,280 |
+| M5 GTK4+libadwaita migration + UI-FUNCTIONS gate | fe466c1 + gate fixes 5137c32 / fa0378b | 41167828374 (#57) FAILURE → 41168536796 (#58) FAILURE → 41169268309 (#59) success | CLOSED — the two red runs were gate-side bugs in the new M5 validate assertion itself (ISO built, all hooks passed; verify step died on the assertion — full record in the M5 section's gate-fix notes); no release exists for #57/#58 | dclawos-2.0-preview-59 | 1,145,554,944 |
+| M6 close-out (this section; docs only) | (this commit) | verified after push; see the M6 report | CLOSED | (the release cut from this commit) | docs-only commit; any byte drift is build nondeterminism, recorded in the M6 report |
+
+### ISO increment accounting (#51 → #59)
+
+Total: 1,060,132,864 (#51) → 1,145,554,944 (#59) =
+**+85,422,080 bytes (≈81.5 MiB)**. Step by step, each figure
+the difference of the two adjacent release assets:
+
+| Step | Delta (bytes) | Attribution |
+|---|---|---|
+| #50 → #51 (M1) | +49,152 | code-level (eventbus / bridgeprotocol / libs) |
+| #51 → #52 (M2) | +78,440,448 | the bulk: WebKitGTK 4.1 (gir1.2-webkit2-4.1) enters the image for the first WebView host, plus the model page / libs |
+| #52 → #53 (M3) | +57,344 | code-level (chat page / chatlib / engine streaming) |
+| #53 → #54 (M3 correction) | 0 | llmlib/chattest fix; ISO size byte-identical |
+| #54 → #55 (M3.1) | +6,144 | code-level |
+| #55 → #56 (M4) | +20,480 | code-level (dashboard page / dashboardlib) |
+| #56 → #59 (M5) | +6,897,664 | net of the stack swap: WebKitGTK 6.0 + GTK4 + libadwaita + GtkSourceView 5 in, WebKitGTK 4.1 + GtkSourceView 4 out, GTK3 kept alongside for the taskbar exception |
+
+Sum check: 78,440,448 + 57,344 + 0 + 6,144 + 20,480 +
+6,897,664 = 85,422,080 ✓ (the #50 → #51 step sits before the
+#51 starting line and is listed only for completeness).
+
+### Per-page / per-window final status
+
+| 页面/窗口 | 形态 | 功能状态 |
+|---|---|---|
+| 模型设置页 (model-settings.html) | WebView（宿主 dclawos-settings，GTK4 + WebKitGTK 6.0） | 完整 — 供应商 CRUD/覆盖层、路由全字段、健康、连通性测试、用量账本（M2）；lockout 跨进程不可得如实报告，不编造 |
+| 聊天页 (chat.html) | WebView（宿主 dclawos-chat，GTK4 + WebKitGTK 6.0） | 完整 — 会话/历史、真流式气泡、工具步骤卡、内联审批卡、停止、斜杠命令、指派表单、模型切换（M3） |
+| 看板页 (dashboard.html) | WebView（宿主 dclawos-dashboard，GTK4 + WebKitGTK 6.0） | 完整 — 事件时间线（启动读一次历史、其后纯推送）、计数区、接管横幅、审批覆盖层（M4）；范围授权未建（见排队清单） |
+| 设置外壳 (dclawos-settings 其余 5 页+AI 原生页） | GTK4 + libadwaita (Adw.ApplicationWindow) | 完整 — 通用/AI与模型/Skills与MCP/渠道/密钥六页功能逐项保留（M5，清单见 UI-FUNCTIONS.md） |
+| 编辑器 (dclawos-editor) | GTK4 + GtkSourceView 5 | 完整 — 打开/保存/查找/替换/跳行/撤销重做/终端/diff 对比窗/agent 修改侧栏逐项保留（M5） |
+| 监视 (dclawos-monitor) | GTK4 + libadwaita | 完整 — 进程总览 + 叫停/恢复/强杀；新鲜度为 M1 事件总线推送，无显示定时器 |
+| 接管 (dclawos-takeover) | GTK4 + libadwaita | 完整，例外说明 — Q2 回填语义不变；其请求列表保留 1s 定时刷新（POLL_MS=1000，M1 推送化未覆盖此窗，UI-FUNCTIONS.md 已登记），推送化不在 Phase 6 授权内 |
+| 审批窗 (dclawos-approve，独立窗） | GTK4 + libadwaita | 完整 — 仍在用的兜底审批入口（看板覆盖层/聊天内联卡与它共用同一 verdict 写路径 chatlib.apply_verdict）；例外说明：其票据列表保留 2s 定时刷新（POLL_MS=2000，源码实证；M6 已在 UI-FUNCTIONS.md 补登记） |
+| 任务栏 (dclawos-shell) | GTK3 例外（Wnck 无 GTK4 等价物） | 完整 — 四槽位切换、48px + _NET_WM_STRUT_PARTIAL 几何逐字未动、M4 四态 agent 指示器；只对齐调色板 |
+| 安装器 (dclawos-installer) | 非 GTK（Calamares，Qt/QML 包装脚本） | 代码就绪、安装成功未验证（见未验证清单）；live 与装后权限区分按 P3-M5 设计 |
+
+### Streaming status (re-checked against the M3 code at M6)
+
+| Format | Path | stream_mode |
+|---|---|---|
+| openai | SSE 真流式（`stream:true`，增量解析，delta 随到随发） | `"sse"` |
+| passthrough | SSE 真流式（同一执行器） | `"sse"` |
+| claude | 非流式 translator 分支，整段回复以 staged delta 显现 — 分阶段显现，非供应商流式 | `"staged"` |
+| 其他注册表格式 | 与流式前一致地 fail closed（不支持的格式） | `"staged"`（在失败 envelope 上；不发出 delta） |
+
+Post-delta failure semantics (M3, unchanged): a failure after
+the first delta closes as an honest partial error
+(`partial: true`) — no other provider silently continues a
+half-written reply.
+
+### Performance sanity （诚实口径）
+
+- Structural fact, from the host code: a WebView (WebKit)
+  process exists only while one of the three WebView windows
+  （模型设置/聊天/看板） is open; closing the host window exits
+  it. Every other surface （设置外壳/编辑器/监视/接管/审批/
+  任务栏） is a native GTK process — there is no always-on
+  browser engine in the system.
+- No runtime performance measurement exists on target
+  hardware: this phase was built and gate-tested headless.
+  QEMU / real-machine visual checks and performance feel
+  remain on the user's verification list (below); nothing in
+  this ledger claims otherwise.
+
+### 未验证与排队总清单 (unverified / queued — NOT done)
+
+Unverified:
+- GTK/WebView 视觉逐页未验：模型设置页、聊天页、看板页、
+  设置外壳、编辑器、监视、接管、审批窗、任务栏指示器 —
+  全部只过了静态门禁 + 无头逻辑门禁，页面内渲染/动画本身
+  未在真显示上看过。
+- Bookworm 精确世代运行时未实跑：M5 代码按 Bookworm API
+  代际（GTK 4.8 / Adw 1.2 / GtkSource 5.6 / WebKitGTK
+  6.0-2.50）写，本地冒烟用的是 Ubuntu 较新栈，CI 为无头
+  静态/逻辑门禁（M5 台账已注明）。
+- 真实供应商全链未验：环境内无真实密钥，一切供应商行为
+  以本地 mock 验证（现行口径，见下方事件归档行）。
+- Calamares 安装未验：安装器代码就绪，安装成功从未在
+  QEMU/真机上跑通验证。
+- partial 流式断线分支未单独断言：post-delta 失败的
+  partial 语义在代码中实现，但没有一条门禁专门断言该
+  分支（M3 门禁覆盖了 pre-delta 失败与正常流式）。
+
+Queued （排队，未做，不许写成已完成）:
+- P0 硬化清单仍排队：票据自批/防篡改、急停防篡改、
+  shell 分级、web_fetch SSRF、systemd 加固、事件发布者
+  认证（M1 台账已注明总线为新鲜度通道、非防篡改通道）。
+- 范围授权 (scoped approval)：需先扩票据模型，排
+  P0/易用性阶段（M4 台账 + UI-FUNCTIONS.md 排队行）。
+- 接管窗/独立审批窗的列表轮询推送化（1s/2s POLL)：不在
+  Phase 6 授权内，现状已如实登记。
+- 后台 `process` 工具的实时输出：M1 登记的
+  DEFERRED-NAMED，需 reader-thread + log-cursor 重构。
+- WhatsApp 渠道：BLOCKED-NAMED，待用户拍板（公网 webhook
+  vs Baileys 风险）。
+- IRC / Mattermost 渠道：Phase 5 登记可行延后。
+- Discord 网关 WebSocket、Slack 历史回补、Matrix E2EE、
+  模型 lockout 跨进程可见性：均为各模块台账中的具名
+  边界，未做。
+
+### Incident archive — 2026-10-31 10:27 授权卡事件
+
+One line, for the record (full account in the M3 Correction
+record above, which this line cross-references and does not
+repeat): at 10:27 CST a Muse permission card fired because
+the first chattest no-key section let `llmlib.call_stream`
+attempt a keyless explicit pin against a provider's DEFAULT
+endpoint unauthenticated (no key, no user data, nothing was
+sent authenticated) — root cause: no no-key short-circuit in
+the library. Disposition: fixed in #54 (call_stream) and
+extended in #55 / M3.1 (call() shares the same
+`_short_circuit`); the standing rule since (user-calibrated
+2026-10-31) is: provider verification uses local mocks, no
+fabricated keys, and endpoint probes carry no user data.

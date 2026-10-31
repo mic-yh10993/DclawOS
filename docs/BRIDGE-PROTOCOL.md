@@ -120,7 +120,7 @@ pass the bridge secret stripping as usual.
 | `chat.model.set` | `{provider, model}` | `{model}` — writes the global default via settingslib.apply_setting (ai-provider / ai-model), the M2 shared store | no |
 | `chat.approve` / `chat.deny` | `{ticket_id}` | `{ticket_id, status}` — the host writes the verdict onto the ticket file exactly as dclawos-approve does (status / approved_by="human-gui" / approved_at via ticketlib); no other verdict channel exists | no |
 | `chat.stop` | `{}` | `{stopped, message}` — the existing cooperative stop only (dclawos-agent-ctl stop) | no |
-| `chat.copy` | `{text?}` | `{copied, length}` — host clipboard (Gtk Clipboard in the shell); defaults to the last AI reply | no |
+| `chat.copy` | `{text?}` | `{copied, length}` — host clipboard (Gdk 4 display clipboard in the shell since M5: `Display.get_clipboard().set(text)`; Gtk.Clipboard no longer exists in GTK4 — wording corrected at M6 to match the shipped host code); defaults to the last AI reply | no |
 | `chat.launch` | `{target: dashboard\|monitor\|settings}` | `{launched}` — host-side Popen of the sibling app | no |
 
 Pushed events to the chat page: event-bus events filtered
